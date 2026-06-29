@@ -1,0 +1,54 @@
+ZPU Simulator and Assembler
+
+This describes the reference Python simulator for the core ZPU ISA and the
+minimal assembler used to feed it. Only the required (hardware) instructions
+are covered; emulated instructions are out of scope for now.
+
+Machine model
+
+Memory is a flat byte array, default 4096 bytes, addressed big-endian. Words
+are 32 bits. Word accesses ignore the low two address bits. All arithmetic is
+unsigned modulo 2^32.
+
+On reset the program is loaded at address 0, PC is 0, and SP is the memory
+size. The stack grows downward: a push first decrements SP by 4 then writes the
+word, a pop reads the word then increments SP by 4. The top of stack is the
+word at SP.
+
+Execution fetches one opcode byte at PC, executes it, and advances PC by one,
+except for POPPC and EMULATE which set PC directly. BREAKPOINT halts the
+simulator. A step limit guards against runaway programs.
+
+Offsets
+
+LOADSP and STORESP take a byte offset that is a multiple of 4 in the range
+0..124. ADDSP takes a byte offset that is a multiple of 4 in the range 0..60.
+All offsets are relative to SP at the start of the instruction.
+
+    LOADSP 0    duplicates the top of stack
+    STORESP 0   drops the top of stack
+    ADDSP 0     doubles the top of stack
+
+Assembler syntax
+
+One instruction per line. A semicolon begins a comment. A token ending in a
+colon defines a label at the current address; labels may share a line with an
+instruction. Integer operands accept decimal or 0x hex and, for IM, a leading
+minus.
+
+    breakpoint pushsp poppc add and or load not flip nop store popsp
+        no operand
+    im N            push a signed 32-bit constant, or a label address
+    loadsp N        byte offset, multiple of 4, 0..124
+    storesp N       byte offset, multiple of 4, 0..124
+    addsp N         byte offset, multiple of 4, 0..60
+    emulate N       vector 0..31
+
+IM with a numeric operand assembles to the shortest legal run of IM bytes,
+most significant 7 bits first, with the first byte sign-extended. IM with a
+label operand always assembles to a fixed five-byte run so that label addresses
+do not depend on their own values.
+
+The hardware merges adjacent IM bytes into one constant, so the assembler
+inserts a NOP between two consecutive IM instructions to keep each one a
+separate push.
