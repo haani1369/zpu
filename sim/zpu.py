@@ -14,6 +14,15 @@ def _reverse_bits(value):
     return result
 
 
+def _signed(value):
+    return value - 0x100000000 if value & 0x80000000 else value
+
+
+def _trunc_div(a, b):
+    quotient = abs(a) // abs(b)
+    return -quotient if (a < 0) != (b < 0) else quotient
+
+
 class ZPU:
     def __init__(self, program, memory_size=4096):
         if len(program) > memory_size:
@@ -78,9 +87,7 @@ class ZPU:
                      + self.read_word(self.sp + offset)) & MASK
             self.write_word(self.sp, total)
         elif op & 0xe0 == 0x20:
-            self.push((self.pc + 1) & MASK)
-            self.pc = (op & 0x1f) * 32
-            branched = True
+            branched = self._emulate(op)
         else:
             branched = self._execute_short(op)
 
@@ -125,6 +132,70 @@ class ZPU:
             self.sp = self.pop()
             return False
         raise ZPUError("illegal opcode 0x%02x at %d" % (op, self.pc))
+
+    def _emulate(self, op):
+        if op == 0x37:                          # eqbranch
+            addr = self.pop()
+            if self.pop() == 0:
+                self.pc = addr
+                return True
+            return False
+        if op == 0x38:                          # neqbranch
+            addr = self.pop()
+            if self.pop() != 0:
+                self.pc = addr
+                return True
+            return False
+
+        if op == 0x31:                          # sub
+            b = self.pop()
+            self.push((self.pop() - b) & MASK)
+        elif op == 0x30:                        # neg
+            self.push((-self.pop()) & MASK)
+        elif op == 0x32:                        # xor
+            self.push(self.pop() ^ self.pop())
+        elif op == 0x29:                        # mult
+            self.push((self.pop() * self.pop()) & MASK)
+        elif op == 0x35:                        # div
+            b = self.pop()
+            a = self.pop()
+            self.push(_trunc_div(_signed(a), _signed(b)) & MASK if b else 0)
+        elif op == 0x36:                        # mod
+            b = self.pop()
+            a = self.pop()
+            sb = _signed(b)
+            sa = _signed(a)
+            self.push((sa - _trunc_div(sa, sb) * sb) & MASK if b else 0)
+        elif op == 0x2a:                        # lshiftright
+            b = self.pop()
+            self.push((self.pop() >> (b & 31)) & MASK)
+        elif op == 0x2b:                        # ashiftleft
+            b = self.pop()
+            self.push((self.pop() << (b & 31)) & MASK)
+        elif op == 0x2c:                        # ashiftright
+            b = self.pop()
+            self.push((_signed(self.pop()) >> (b & 31)) & MASK)
+        elif op == 0x2e:                        # eq
+            self.push(1 if self.pop() == self.pop() else 0)
+        elif op == 0x2f:                        # neq
+            self.push(1 if self.pop() != self.pop() else 0)
+        elif op == 0x24:                        # lessthan
+            b = self.pop()
+            self.push(1 if _signed(self.pop()) < _signed(b) else 0)
+        elif op == 0x25:                        # lessthanorequal
+            b = self.pop()
+            self.push(1 if _signed(self.pop()) <= _signed(b) else 0)
+        elif op == 0x26:                        # ulessthan
+            b = self.pop()
+            self.push(1 if self.pop() < b else 0)
+        elif op == 0x27:                        # ulessthanorequal
+            b = self.pop()
+            self.push(1 if self.pop() <= b else 0)
+        else:
+            self.push((self.pc + 1) & MASK)
+            self.pc = (op & 0x1f) * 32
+            return True
+        return False
 
     def run(self, limit=1000000):
         steps = 0

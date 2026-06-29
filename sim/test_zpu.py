@@ -43,6 +43,23 @@ def test_basic_bench():
     assert cpu.read_word(0x200) == 0x55
 
 
+def test_emulated():
+    assert run("im 10", "im 3", "sub", "breakpoint").stack() == [7]
+    assert run("im 6", "im 7", "mult", "breakpoint").stack() == [42]
+    assert run("im 5", "im 5", "eq", "breakpoint").stack() == [1]
+    assert run("im -1", "im 0", "lessthan", "breakpoint").stack() == [1]
+    assert run("im -1", "im 0", "ulessthan", "breakpoint").stack() == [0]
+
+
+def test_eqbranch():
+    cpu = run("im 1", "im taken", "eqbranch", "im 111", "im end", "poppc",
+              "taken:", "im 222", "end:", "breakpoint")
+    assert cpu.stack() == [111]
+    cpu = run("im 0", "im taken", "eqbranch", "im 111", "im end", "poppc",
+              "taken:", "im 222", "end:", "breakpoint")
+    assert cpu.stack() == [222]
+
+
 def main():
     for name, fn in sorted(globals().items()):
         if name.startswith("test_"):

@@ -13,6 +13,23 @@ NULLARY = {
     "nop": 0x0b,
     "store": 0x0c,
     "popsp": 0x0d,
+    "lessthan": 0x24,
+    "lessthanorequal": 0x25,
+    "ulessthan": 0x26,
+    "ulessthanorequal": 0x27,
+    "mult": 0x29,
+    "lshiftright": 0x2a,
+    "ashiftleft": 0x2b,
+    "ashiftright": 0x2c,
+    "eq": 0x2e,
+    "neq": 0x2f,
+    "neg": 0x30,
+    "sub": 0x31,
+    "xor": 0x32,
+    "div": 0x35,
+    "mod": 0x36,
+    "eqbranch": 0x37,
+    "neqbranch": 0x38,
 }
 
 LABEL_IM_BYTES = 5
