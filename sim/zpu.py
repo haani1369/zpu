@@ -152,7 +152,20 @@ class ZPU:
                 return True
             return False
 
-        if op == 0x31:                          # sub
+        if op == 0x22:                          # loadh
+            addr = self.pop()
+            self.push((self.mem[addr] << 8) | self.mem[addr + 1])
+        elif op == 0x23:                        # storeh
+            addr = self.pop()
+            value = self.pop()
+            self.mem[addr] = (value >> 8) & 0xff
+            self.mem[addr + 1] = value & 0xff
+        elif op == 0x33:                        # loadb
+            self.push(self.mem[self.pop()])
+        elif op == 0x34:                        # storeb
+            addr = self.pop()
+            self.mem[addr] = self.pop() & 0xff
+        elif op == 0x31:                        # sub
             b = self.pop()
             self.push((self.pop() - b) & MASK)
         elif op == 0x30:                        # neg
