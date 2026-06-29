@@ -17,6 +17,7 @@ NULLARY = {
     "lessthanorequal": 0x25,
     "ulessthan": 0x26,
     "ulessthanorequal": 0x27,
+    "call": 0x2d,
     "mult": 0x29,
     "lshiftright": 0x2a,
     "ashiftleft": 0x2b,

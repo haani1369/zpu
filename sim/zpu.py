@@ -134,6 +134,11 @@ class ZPU:
         raise ZPUError("illegal opcode 0x%02x at %d" % (op, self.pc))
 
     def _emulate(self, op):
+        if op == 0x2d:                          # call
+            addr = self.pop()
+            self.push((self.pc + 1) & MASK)
+            self.pc = addr
+            return True
         if op == 0x37:                          # eqbranch
             addr = self.pop()
             if self.pop() == 0:

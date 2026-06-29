@@ -60,6 +60,13 @@ def test_eqbranch():
     assert cpu.stack() == [222]
 
 
+def test_call():
+    prog = ("main:", "im 0", "im 4", "im 3", "im add", "call", "breakpoint",
+            "add:", "loadsp 4", "loadsp 12", "add", "storesp 16", "loadsp 0",
+            "storesp 12", "pushsp", "im 8", "add", "popsp", "poppc")
+    assert run(*prog).stack()[0] == 7
+
+
 def main():
     for name, fn in sorted(globals().items()):
         if name.startswith("test_"):
