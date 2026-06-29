@@ -1,0 +1,123 @@
+ZPU Instruction Set Architecture
+
+The ZPU is a 32-bit, big-endian, stack-based CPU. There are no general
+purpose registers. Operands live on a stack that grows downward in
+memory. Two architectural registers are visible to software:
+
+    PC  program counter
+    SP  stack pointer
+
+Words are 32 bits. Memory is byte addressed. The top of stack is the
+word at the address held in SP.
+
+Instruction encoding
+
+Every instruction is one byte. The opcode is decoded by examining the
+high bits:
+
+    1iiiiiii   IM       7-bit immediate
+    010ooooo   STORESP  5-bit offset
+    011ooooo   LOADSP   5-bit offset
+    0001oooo   ADDSP    4-bit offset
+    001vvvvv   EMULATE  5-bit vector
+    00000000   BREAKPOINT
+    0000xxxx   short opcodes (see below)
+
+Required instructions
+
+These must be implemented in hardware.
+
+BREAKPOINT (0x00)
+    Trap to the debugger.
+
+IM (0x80-0xFF)
+    Push a sign-extended 7-bit immediate. If the previous instruction
+    was also IM, instead shift the top of stack left by 7 bits and OR
+    in the new 7 bits. This lets longer constants be built from a run
+    of IM bytes, most significant 7 bits first.
+
+PUSHSP (0x02)
+    Push the current value of SP onto the stack.
+
+POPPC (0x04)
+    Pop a value and load it into PC. Used for return.
+
+ADD (0x05)
+    Pop a, pop b, push a + b.
+
+AND (0x06)
+    Pop a, pop b, push a & b.
+
+OR (0x07)
+    Pop a, pop b, push a | b.
+
+LOAD (0x08)
+    Pop an address, push the word at that address.
+
+NOT (0x09)
+    Pop a, push ~a.
+
+FLIP (0x0A)
+    Pop a, push a with its bit order reversed.
+
+NOP (0x0B)
+    Do nothing.
+
+STORE (0x0C)
+    Pop an address, pop a value, write the value at the address.
+
+POPSP (0x0D)
+    Pop a value and load it into SP.
+
+LOADSP (0x60-0x7F)
+    offset = ((opcode & 0x1F) ^ 0x10) * 4
+    Push the word at SP + offset.
+
+STORESP (0x40-0x5F)
+    offset = ((opcode & 0x1F) ^ 0x10) * 4
+    Pop a value and write it at SP + offset.
+
+ADDSP (0x10-0x1F)
+    offset = (opcode & 0x0F) * 4
+    Replace the top of stack with (top of stack) + (word at SP + offset).
+
+EMULATE (0x20-0x3F)
+    Push PC + 1, then set PC to (opcode & 0x1F) * 32. This vectors to a
+    fixed table of software handlers, one 32-byte slot per opcode, so
+    that the instructions below can be emulated on minimal hardware.
+
+Emulated instructions
+
+Reached through EMULATE. The number is the opcode value. A given
+implementation may instead provide any of these directly in hardware.
+
+    34  LOADH              load 16-bit halfword
+    35  STOREH             store 16-bit halfword
+    36  LESSTHAN           signed a < b
+    37  LESSTHANOREQUAL    signed a <= b
+    38  ULESSTHAN          unsigned a < b
+    39  ULESSTHANOREQUAL   unsigned a <= b
+    40  SWAP               swap the two halfwords of the top word
+    41  MULT               a * b
+    42  LSHIFTRIGHT        logical shift right
+    43  ASHIFTLEFT         arithmetic shift left
+    44  ASHIFTRIGHT        arithmetic shift right
+    45  CALL               call, leaving return address on the stack
+    46  EQ                 a == b
+    47  NEQ                a != b
+    48  NEG                -a
+    49  SUB                a - b
+    50  XOR                a ^ b
+    51  LOADB              load byte
+    52  STOREB             store byte
+    53  DIV                signed divide
+    54  MOD                signed modulo
+    55  EQBRANCH           branch if top is zero
+    56  NEQBRANCH          branch if top is non-zero
+    57  POPPCREL           pop PC relative
+    58  CONFIG             configure the implementation
+    59  PUSHPC             push the current PC
+    60  SYSCALL            system call
+    61  PUSHSPADD          push SP + value * 4
+    62  HALFMULT           halfword multiply
+    63  CALLPCREL          call PC relative
