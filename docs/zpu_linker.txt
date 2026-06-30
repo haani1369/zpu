@@ -1,0 +1,142 @@
+zpu linker design
+
+this is the spec for linker/zpld.py and how clang's zpu toolchain drives
+it. written before the rewrite, per the project's design-doc-first
+workflow. see docs/lld_handoff.txt for how this came about.
+
+
+memory map
+
+the linker places one flat image starting at address 0, matching the
+simulator (pc and sp both start relative to a single byte-addressed
+memory array, see sim/zpu.py). sections are grouped by kind across all
+input objects, in this fixed order:
+
+    .text    code
+    .rodata  read-only data (string literals, constant arrays)
+    .data    initialized writable data
+    .bss     zero-initialized writable data
+
+within a group, sections keep the order their objects were given on the
+command line. each section is padded to its own sh_addralign before being
+placed. .bss sections still occupy space in the output image (the
+simulator has no separate "zero-fill at load" step), but since the
+image is conceptually all zero already, this only matters for file size,
+not correctness.
+
+there is no fixed reserved region: __zpu_fp (the dynamic-frame-pointer
+global, defined in runtime/builtins.c) is an ordinary .bss symbol like
+any other global.
+
+sp is not set up by the linker. it is whatever the simulator initializes
+it to (top of its memory array, see ZPU.__init__). the entry trampoline
+below assumes a fully empty stack at address 0, descending.
+
+
+entry contract (crt0)
+
+the linker does not link in a separate crt0 object. there is no _start
+symbol and no argc/argv. instead the linker always synthesizes a fixed
+instruction sequence at the start of the output image, before any input
+object's code:
+
+    im 0            ; reserve the result slot
+    im <ret>        ; return address: points at the breakpoint below
+    im <entry>      ; entry symbol's resolved address (default: main)
+    call
+ret:
+    breakpoint
+
+this is exactly the calling convention every other call site uses
+(reserve a result slot, push arguments, im <callee>, call) with zero
+arguments, so the entry symbol is an ordinary C function compiled like
+any other -- it does not need special handling in the backend. when it
+returns, its result sits in the slot reserved above, which is the top
+of the stack at the moment the breakpoint fires. this is why
+examples/run.py and the simulator's own cli print cpu.stack()[0] as the
+program's result.
+
+the entry symbol defaults to "main" and is overridable with --entry.
+this only works for functions taking no arguments, since the trampoline
+pushes none; that covers every example program and is the only
+signature the toolchain needs to support today.
+
+a real crt0.o (and a renamed _start entry point, as docs/lld_handoff.txt
+originally proposed) was considered, but would need the zpu backend to
+support llvm-mc text assembly or inline asm to express "call main; trap"
+by hand, neither of which exist yet. synthesizing the trampoline in the
+linker gets the same result with no new backend work.
+
+
+relocations
+
+r_zpu_im is the only relocation type and is unchanged: the fixup
+records the symbol and addend, and the linker writes
+resolved_value + addend across the five 7-bit fields of an im run, most
+significant first. it is used for every symbolic im in generated code:
+branch and call targets, global address loads, and (now) the same
+mechanism the lower-to-stack pass already used for far-frame address
+arithmetic.
+
+no data relocation (e.g. r_zpu_32, for a table of function pointers in
+.data) exists yet because nothing in the backend emits one. one should
+be added, matching the r_zpu_im plumbing in zpumctargetdesc.h and
+zpuelfobjectwriter.cpp, if and when something needs it.
+
+
+runtime linking
+
+runtime/builtins.c and runtime/softfloat.c are compiled (by the same
+clang invocation that's doing the link) and linked into every program
+unconditionally, the same way examples/run.py has always concatenated
+them into every example's source. this is the interim approach noted in
+docs/lld_handoff.txt step 7 instead of building a real archive reader:
+it costs a little extra compile time per link and a little dead code in
+small binaries, and avoids needing an ar format reader. step 7
+(archives, pulling in only what's referenced) is not done.
+
+
+symbol resolution
+
+global (stb_global) defined symbols form one namespace across all
+input objects; defining the same global symbol in two objects is a
+link error. local (stb_local) symbols never enter that namespace --
+a relocation against a local symbol is resolved directly against the
+defining object's own symbol table entry, so locals with the same name
+in different objects never collide. there is no common-symbol
+handling: clang emits tentative definitions straight into .bss, not as
+SHN_COMMON, so none has been needed.
+
+
+cli
+
+  zpld.py input.o [input.o ...] -o output.bin [--entry SYM] [--map PATH]
+
+--map defaults to output.bin.map. there is no -l/-L: there is no
+archive support to search, and the runtime is always linked in (see
+above).
+
+
+driver integration
+
+clang/lib/Driver/ToolChains/ZPU.cpp gives the zpu toolchain its own
+Linker tool, overriding ZPUToolChain::buildLinker(), instead of
+falling through to Generic_ELF's gnu ld-style linker (which doesn't
+exist for this target). it invokes:
+
+    python3 /workspace/linker/zpld.py <inputs> \
+        <clang -c of runtime/builtins.c and runtime/softfloat.c> \
+        -o <output>
+
+the repo root and the runtime sources are referenced by their fixed
+path under /workspace, matching how the rest of the build (see
+docs/lld_handoff.txt's build notes) already assumes a fixed checkout
+location rather than being relocatable.
+
+
+what is still missing
+
+  - archive support (step 7): runtime is linked whole, every time.
+  - a data relocation for function-pointer tables, if anything needs one.
+  - common-symbol merging, if a future source pattern needs it.
+  - any entry symbol signature other than zero arguments.
