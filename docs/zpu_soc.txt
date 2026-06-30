@@ -249,6 +249,18 @@ are ordinary file-scope arrays inside zpu_console.c, not fixed addresses
 as any other global, so there is no possibility of them colliding with
 the guest program's own data the way a hardcoded address could.
 
+a buffer handed to the device only through its address, with nothing in
+the visible c code reading it back, looks dead to the compiler: nothing
+proves the store into it is ever observed, so an otherwise unremarkable
+optimization can delete the store and hand the device a pointer to
+whatever was there before. zpu_console_putc hit exactly this -- the
+one-byte local it points the device at must be volatile, or the
+character never actually gets written before the device reads it. the
+same reasoning applies to rx_buf on the receive side, which is written
+only by the device's "dma" into guest memory and never by anything the
+compiler can see: it is also volatile, even though nothing has yet
+caught a miscompile there.
+
 
 layout in this repository
 
