@@ -1,0 +1,228 @@
+zpu project handoff: linker work
+
+this file is for an agent picking up linker work on the zpu toolchain. it
+covers what exists, how it fits together, the one known bug, and the plan
+for a complete linker. read this before touching linker/zpld.py.
+
+
+repository layout
+
+outer repo, branch zpu-backend (this is also where sim work landed; the
+branch zpu-sim is an earlier ancestor, now merged into zpu-backend's history
+of work):
+
+  docs/zpu_isa.txt        isa reference
+  docs/zpu_sim.txt         simulator/assembler spec
+  docs/lld_handoff.txt     this file
+  sim/zpu.py               the reference vm. run as a script:
+                             python3 sim/zpu.py prog.bin --limit N
+  sim/assembler.py         minimal assembler, text asm -> flat binary. run as
+                             a script: python3 sim/assembler.py prog.s -o out.bin
+  sim/test_zpu.py          tests for the vm and assembler
+  runtime/builtins.c       i64 multiply/divide/shift, unsigned 32-bit
+                             divide/modulo, the __zpu_fp global
+  runtime/softfloat.c      ieee single/double precision arithmetic
+  linker/zpld.py           the minimal linker. this is what needs work.
+  examples/*.c             small test programs, examples/run.py compiles and
+                             runs them through the text-asm path (not the
+                             linker)
+  llvm-project/             submodule, branch zpu-backend, the llvm/clang
+                             backend (llvm/lib/Target/ZPU/)
+
+build the backend with:
+
+  cmake -G Ninja -S llvm-project/llvm -B llvm-project/build \
+    -DLLVM_TARGETS_TO_BUILD="" -DLLVM_EXPERIMENTAL_TARGETS_TO_BUILD="ZPU" \
+    -DLLVM_ENABLE_PROJECTS="clang" -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++ -DLLVM_CCACHE_BUILD=ON
+
+  ninja -C llvm-project/build llc llvm-mc llvm-readobj
+  ninja -C llvm-project/build -j4 clang     (use -j4, not the default, or
+                                              cc1plus gets OOM-killed)
+
+rebuilding llc does not rebuild clang. clang -S does codegen inside clang
+itself, so it needs to be rebuilt too whenever the backend changes, or it
+will run stale code (and can crash or silently emit wrong output).
+
+
+what the backend supports
+
+the compiler at llvm-project/llvm/lib/Target/ZPU handles essentially all of
+c at -o0 through -o2:
+
+  - functions, recursion, the full calling convention (traditional zylin
+    abi: caller reserves a result slot, pushes args, then im <fn>; call)
+  - control flow: if/for/while/?:, comparisons, select/min/max
+  - all integer arithmetic, signed and unsigned, including the emulated
+    instructions (mult, div, shifts, etc) that go through the zpu's
+    emulate dispatch
+  - pointers, arrays, structs, alloca, address-taken locals
+  - global variables, char/short via byte/halfword load/store
+  - arbitrarily large stack frames (loadsp/storesp cap at 124 bytes; beyond
+    that the backend falls back to pushsp;im;add;load/store)
+  - 64-bit integers (long long): multi-word, big-endian abi. add/sub/
+    bitwise/compare/constant-shift legalize inline; multiply, divide, and
+    variable shift route to runtime calls (__muldi3, __divdi3, __ashldi3,
+    ...) resolved against runtime/builtins.c
+  - float and double via a soft-float runtime (runtime/softfloat.c),
+    bit-exact against the host fpu in testing
+  - dynamic/variable-length alloca: functions with var-sized objects use a
+    global frame pointer __zpu_fp (defined in builtins.c) instead of pure
+    sp-relative addressing
+  - relocations: external symbols (calls, globals) emit an r_zpu_im
+    relocation (see mctargetdesc/zpuelfobjectwriter.cpp,
+    zpumctargetdesc.h) instead of being silently dropped
+
+see llvm-project's git log on zpu-backend for the commit-by-commit history;
+each commit is scoped to one piece of this.
+
+
+the known bug: large frames through the object+linker path
+
+there are two ways to get a runnable program out of this toolchain:
+
+  1. text assembly path: llc emits .s text, the python assembler in sim/
+     resolves all labels itself and produces a flat binary in one shot.
+     this path is correct for everything tested so far, including large
+     frames. examples/run.py uses this path exclusively.
+
+  2. object + linker path: llc -filetype=obj emits an elf32 object with
+     relocations, linker/zpld.py combines objects and resolves the
+     relocations. this path is correct for normal-sized frames and has
+     been verified for cross-translation-unit calls, globals, and the i64/
+     float runtime linked as separate objects. it is NOT correct for
+     functions whose frame exceeds the loadsp/storesp range (the far-path
+     fallback described above).
+
+repro: compile examples/sieve.c (or any function with a stack frame over
+~120 bytes) with llc -filetype=obj, link it with zpld.link(), and run. the
+loop branch target resolves a few bytes off and execution runs into
+garbage.
+
+what's confirmed: the asm text emitted by llc for these functions is
+correct (verified by running it through the text-asm path). the object
+emitted by llc -filetype=obj for the SAME function, when linked, is not.
+so the bug is in object emission and/or relocation of the branch targets
+specifically in the far-frame fallback sequence, or in how zpld.py applies
+those relocations. it has not been root-caused yet.
+
+start here: dump the .text bytes and relocations for a minimal repro (an
+int function with roughly 40+ locals/array elements and a loop) via
+llvm-readobj -r --expand-relocs, decode the im run at the loop-header
+branch site by hand, and compare the resolved target against the actual
+label offset computed from the asm. that will show whether the addend mc
+emits is wrong, or whether zpld.py mis-applies a correct addend.
+
+
+what the linker currently does (linker/zpld.py)
+
+short version: it concatenates allocatable sections from a list of elf32
+objects, builds a global symbol table from global-bound defined symbols,
+and walks each object's rela section applying r_zpu_im relocations (the
+only relocation type that exists) by writing value+addend across the five
+7-bit fields of an im run.
+
+what it does NOT do: validate the input beyond checking the elf magic and
+class; handle archives; support multiple relocation types (only r_zpu_im
+exists right now -- there is no relocation for a raw 32-bit data word,
+which would be needed for e.g. a table of function pointers); provide
+crt0/startup code (callers hand-roll a four-instruction stub: reserve a
+result slot, push the return address, jump to main, halt on return);
+report a useful error for an unresolved symbol (it raises but with no
+context); deduplicate or version symbols; or expose flags beyond -o.
+
+
+plan for a complete linker
+
+roughly in dependency order. step 0 is a blocker for everything else; step
+1 (the spec) should be written and agreed before large code changes, per
+the project's normal workflow (design doc / spec first, then tests against
+that spec, then implementation).
+
+0. root-cause and fix the large-frame relocation bug (see above). nothing
+   downstream is trustworthy until this is fixed, since it means either mc
+   relocation emission or relocation application has a bug that could
+   affect other relocation types too.
+
+1. write a design doc (docs/, .txt, no .md) covering:
+     - the memory map: load addresses for .text/.rodata/.data/.bss,
+       initial sp, where __zpu_fp's storage lives, anything reserved
+     - the full relocation set needed. confirm r_zpu_im covers branches,
+       calls, and global address loads (the only places llc emits a
+       symbolic im). check whether a data relocation is needed for things
+       like array-of-function-pointers, which would write a raw 32-bit
+       value into a data section rather than spreading it across an im
+       run -- if so, add an r_zpu_32 (or similar) relocation type to the
+       backend's elf object writer and asm backend, matching the existing
+       r_zpu_im plumbing in zpumctargetdesc.h / zpuelfobjectwriter.cpp
+     - the entry contract: what symbol does the linker jump to, what state
+       does it expect (sp, result slot) on entry
+
+2. harden elf parsing: bounds-check every table read, validate magic/
+   class/endianness explicitly (already partially done), handle sht_nobits
+   (.bss, zero-filled, no data) correctly, skip non-alloc sections.
+
+3. section layout: group input sections into output sections (.text,
+   .rodata, .data, .bss) in a fixed order rather than the current "one
+   .text per object back to back," honor section alignment, place .bss
+   last as zero-fill, and produce a layout/map as part of the build (not
+   just symbol addresses, which is what .map has today).
+
+4. symbol resolution: a real global table with duplicate-definition
+   errors, local-vs-global scoping (locals from different objects must
+   not collide), tentative/common symbol support (uninitialized globals
+   without explicit zero-init currently rely on .bss already being
+   correctly sized per object; common-symbol merging is not handled),
+   and weak symbols if the runtime ever needs them.
+
+5. relocation application: apply r_zpu_im (existing) and any new types
+   from step 1, with overflow/alignment checks and a clear error
+   (symbol name, file, offset) instead of a bare exception.
+
+6. crt0: a small startup object (asm or c) that sets up sp, calls main,
+   and halts or loops forever, so linked output is self-contained and the
+   caller does not hand-write the stub. the linker's default entry point
+   becomes _start, not main.
+
+7. archive support: read ar archives (the standard format, see binutils
+   or llvm's own ar reader for reference) so runtime/builtins.c and
+   softfloat.c can be packaged as a library and only the objects that
+   resolve an undefined symbol get pulled in, rather than always linking
+   the whole runtime.
+
+8. cli and output: real flags (-o, -l/-L for libraries, --entry, --map
+   path), and keep the existing flat-binary output format unless there's
+   a reason to change it (the simulator only understands a flat image).
+
+9. tests, written against the step-1 spec before/alongside the
+   implementation: multi-file links, the runtime linked as a library,
+   globals and arrays and string literals, .bss-only globals, function
+   pointers (if step 1 decided they need a data relocation), large frames
+   (regression for the step-0 bug), and the full examples/ set linked and
+   run through the object+linker path instead of the text-asm path it
+   uses today.
+
+10. wire it into the normal compile flow so a multi-file c program can go
+    clang -c per file, then the linker, then the simulator, without a
+    hand-rolled entry stub -- mirroring how examples/run.py currently
+    wraps the text-asm path.
+
+each step should land as its own commit or small set of commits, per the
+project's standing rule against mixing unrelated changes; the linker
+already has precedent for this in the llvm-project submodule's commit
+history (one feature per commit, e.g. "[zpu] emit relocations for external
+symbols", "[zpu] include the offset in global address references").
+
+
+useful entry points for testing while working on this
+
+  - sim/zpu.py and sim/assembler.py have cli entry points (see their
+    main() functions) for assembling and running text asm directly,
+    useful for producing a known-correct reference to diff the
+    object+linker path against.
+  - examples/*.c plus examples/run.py is the known-good baseline (text-asm
+    path). once the linker is solid, point 10 above should let the same
+    programs run through the linker path too, which is a natural
+    regression suite.
+  - llvm-readobj (build it: ninja -C llvm-project/build llvm-readobj) for
+    inspecting relocations and symbols in generated objects.
