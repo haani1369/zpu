@@ -286,19 +286,21 @@ class IntegrationTests(unittest.TestCase):
         base = bus.attach(console, 0x200)
         console.attach_ram(bus.ram)
 
-        bring_up(console, VirtioConsole.TRANSMITQ, 4, 0x300, 0x340, 0x380)
-        bus.ram[0x3c0:0x3c5] = b"hola!"
-        poke_descriptor(bus.ram, 0x300, 0, 0x3c0, 5, 0, 0)
-        publish(bus.ram, 0x340, 4, 0, 0)
-        console.write32(STATUS, VirtioMMIODevice.DRIVER_OK)
-
         program = assemble(
             "    im %d\n"
             "    im %d\n"
             "    store\n"
             "    breakpoint\n" % (VirtioConsole.TRANSMITQ, base + QUEUENOTIFY))
         cpu = ZPU(program, memory_size=1024)
+        bus.ram[:] = cpu.mem
         cpu.mem = bus
+
+        bring_up(console, VirtioConsole.TRANSMITQ, 4, 0x300, 0x340, 0x380)
+        bus.ram[0x3c0:0x3c5] = b"hola!"
+        poke_descriptor(bus.ram, 0x300, 0, 0x3c0, 5, 0, 0)
+        publish(bus.ram, 0x340, 4, 0, 0)
+        console.write32(STATUS, VirtioMMIODevice.DRIVER_OK)
+
         cpu.run(limit=1000)
 
         self.assertEqual(bytes(output), b"hola!")
