@@ -4,6 +4,13 @@ this file is for an agent picking up linker work on the zpu toolchain. it
 covers what exists, how it fits together, the one known bug, and the plan
 for a complete linker. read this before touching linker/zpld.py.
 
+status update: the bug below is fixed, the linker has been rewritten, and
+clang --target=zpu prog.c -o prog.bin now works with no manual steps,
+single- and multi-file. see docs/zpu_linker.txt for the current design,
+the crt0/entry contract, and what's still missing (mainly archive
+support). the rest of this file is kept as-is for history; the plan
+section below notes which steps landed.
+
 
 repository layout
 
@@ -113,6 +120,22 @@ branch site by hand, and compare the resolved target against the actual
 label offset computed from the asm. that will show whether the addend mc
 emits is wrong, or whether zpld.py mis-applies a correct addend.
 
+root cause (found): nothing to do with large frames or the linker
+specifically. ZPULowerToStack's "split adjacent im instructions with a
+nop" pass runs before stack branches (unconditional jumps, and
+frame-pointer-relative conditional branches) are expanded into real
+instructions by ZPUAsmPrinter, so it can't see that some of those
+expansions begin with an im. when a real im happened to immediately
+precede one of these branches -- common once a function has enough
+locals and loops to need a phi copy right before a backward branch,
+which is exactly what large frames correlate with -- the two im runs
+ended up adjacent in the actual byte stream with no nop, and the
+hardware's im-chaining merged them into one push instead of two. fixed
+by moving the nop insertion into ZPUAsmPrinter itself, the one point
+every instruction actually reaches the streamer, in
+llvm-project commit "[ZPU] Fix missed adjacent-IM nop before stack
+branches". the now-redundant MI-level pass was removed.
+
 
 what the linker currently does (linker/zpld.py)
 
@@ -139,12 +162,13 @@ roughly in dependency order. step 0 is a blocker for everything else; step
 the project's normal workflow (design doc / spec first, then tests against
 that spec, then implementation).
 
-0. root-cause and fix the large-frame relocation bug (see above). nothing
-   downstream is trustworthy until this is fixed, since it means either mc
-   relocation emission or relocation application has a bug that could
-   affect other relocation types too.
+0. [done] root-cause and fix the large-frame relocation bug (see above).
+   nothing downstream is trustworthy until this is fixed, since it means
+   either mc relocation emission or relocation application has a bug that
+   could affect other relocation types too.
 
-1. write a design doc (docs/, .txt, no .md) covering:
+1. [done, see docs/zpu_linker.txt] write a design doc (docs/, .txt, no
+   .md) covering:
      - the memory map: load addresses for .text/.rodata/.data/.bss,
        initial sp, where __zpu_fp's storage lives, anything reserved
      - the full relocation set needed. confirm r_zpu_im covers branches,
@@ -158,54 +182,72 @@ that spec, then implementation).
      - the entry contract: what symbol does the linker jump to, what state
        does it expect (sp, result slot) on entry
 
-2. harden elf parsing: bounds-check every table read, validate magic/
-   class/endianness explicitly (already partially done), handle sht_nobits
-   (.bss, zero-filled, no data) correctly, skip non-alloc sections.
+2. [done] harden elf parsing: bounds-check every table read, validate
+   magic/class/endianness explicitly (already partially done), handle
+   sht_nobits (.bss, zero-filled, no data) correctly, skip non-alloc
+   sections.
 
-3. section layout: group input sections into output sections (.text,
-   .rodata, .data, .bss) in a fixed order rather than the current "one
-   .text per object back to back," honor section alignment, place .bss
-   last as zero-fill, and produce a layout/map as part of the build (not
-   just symbol addresses, which is what .map has today).
+3. [done] section layout: group input sections into output sections
+   (.text, .rodata, .data, .bss) in a fixed order rather than the current
+   "one .text per object back to back," honor section alignment, place
+   .bss last as zero-fill, and produce a layout/map as part of the build
+   (not just symbol addresses, which is what .map has today). the map is
+   still just symbol addresses; a fuller layout map was not added since
+   nothing has needed one yet.
 
-4. symbol resolution: a real global table with duplicate-definition
-   errors, local-vs-global scoping (locals from different objects must
-   not collide), tentative/common symbol support (uninitialized globals
-   without explicit zero-init currently rely on .bss already being
-   correctly sized per object; common-symbol merging is not handled),
-   and weak symbols if the runtime ever needs them.
+4. [done] symbol resolution: a real global table with duplicate-
+   definition errors, local-vs-global scoping (locals from different
+   objects must not collide), tentative/common symbol support
+   (uninitialized globals without explicit zero-init currently rely on
+   .bss already being correctly sized per object; common-symbol merging
+   is not handled), and weak symbols if the runtime ever needs them.
+   turned out unneeded: clang emits tentative defs straight into .bss as
+   ordinary global symbols, not SHN_COMMON, so there was nothing to
+   merge. weak symbols still aren't supported; nothing has needed one.
 
-5. relocation application: apply r_zpu_im (existing) and any new types
-   from step 1, with overflow/alignment checks and a clear error
-   (symbol name, file, offset) instead of a bare exception.
+5. [done] relocation application: apply r_zpu_im (existing) and any new
+   types from step 1, with overflow/alignment checks and a clear error
+   (symbol name, file, offset) instead of a bare exception. no data
+   relocation turned out to be needed (see docs/zpu_linker.txt), so
+   r_zpu_im is still the only type; overflow isn't reachable either,
+   since r_zpu_im's 35 usable bits always fit a 32-bit address.
 
-6. crt0: a small startup object (asm or c) that sets up sp, calls main,
-   and halts or loops forever, so linked output is self-contained and the
-   caller does not hand-write the stub. the linker's default entry point
-   becomes _start, not main.
+6. [done, differently than planned] crt0: docs/zpu_linker.txt explains
+   why this ended up as a trampoline synthesized by the linker itself
+   rather than a separate compiled object with a _start symbol -- it
+   gets the same result without needing the zpu backend to support
+   text assembly or inline asm.
 
-7. archive support: read ar archives (the standard format, see binutils
-   or llvm's own ar reader for reference) so runtime/builtins.c and
-   softfloat.c can be packaged as a library and only the objects that
-   resolve an undefined symbol get pulled in, rather than always linking
-   the whole runtime.
+7. [deferred] archive support: read ar archives (the standard format,
+   see binutils or llvm's own ar reader for reference) so
+   runtime/builtins.c and softfloat.c can be packaged as a library and
+   only the objects that resolve an undefined symbol get pulled in,
+   rather than always linking the whole runtime. the interim approach
+   from docs/zpu_linker.txt is in place instead: clang compiles and
+   links both runtime sources into every program. revisit if either
+   link time or output size from the unused runtime code becomes a
+   problem.
 
-8. cli and output: real flags (-o, -l/-L for libraries, --entry, --map
+8. [done, minus -l/-L] cli and output: real flags (-o, --entry, --map
    path), and keep the existing flat-binary output format unless there's
    a reason to change it (the simulator only understands a flat image).
+   -l/-L were skipped since there's no archive support yet to search.
 
-9. tests, written against the step-1 spec before/alongside the
-   implementation: multi-file links, the runtime linked as a library,
-   globals and arrays and string literals, .bss-only globals, function
-   pointers (if step 1 decided they need a data relocation), large frames
-   (regression for the step-0 bug), and the full examples/ set linked and
-   run through the object+linker path instead of the text-asm path it
-   uses today.
+9. [done] tests, written against the step-1 spec before/alongside the
+   implementation: multi-file links, the runtime linked in, globals and
+   .bss-only globals, large relocation addends (regression for the
+   step-0 bug), and the full examples/ set linked and run through the
+   object+linker path instead of the text-asm path it uses today (see
+   examples/run_linked.py). function pointers and array/string-literal
+   relocations specifically were not added as tests, since step 1 found
+   no new relocation type was needed for them.
 
-10. wire it into the normal compile flow so a multi-file c program can go
-    clang -c per file, then the linker, then the simulator, without a
-    hand-rolled entry stub -- mirroring how examples/run.py currently
-    wraps the text-asm path.
+10. [done] wire it into the normal compile flow so a multi-file c
+    program can go clang -c per file, then the linker, then the
+    simulator, without a hand-rolled entry stub -- mirroring how
+    examples/run.py currently wraps the text-asm path. clang's own link
+    step now invokes the linker directly (see docs/zpu_linker.txt),
+    rather than the caller invoking it separately.
 
 each step should land as its own commit or small set of commits, per the
 project's standing rule against mixing unrelated changes; the linker
