@@ -3,6 +3,9 @@ typedef int s32;
 typedef unsigned long long u64;
 typedef long long s64;
 
+// Frame pointer for functions with dynamically sized stack objects.
+unsigned __zpu_fp;
+
 static u64 mul32(u32 a, u32 b) {
     u32 al = a & 0xffff, ah = a >> 16;
     u32 bl = b & 0xffff, bh = b >> 16;
