@@ -229,3 +229,8 @@ layout in this repository
 run the demo with:
 
     python3 soc/zpu_soc.py soc/hello_console.s
+
+it brings the transmitq up, sends one message, polls the used ring until
+the device completes it, and halts. expected output:
+
+    hello from zpu!
