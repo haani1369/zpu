@@ -223,3 +223,22 @@ class ZPU:
             self.step()
             steps += 1
         return steps
+
+
+def main():
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("file")
+    parser.add_argument("--memory", type=int, default=1 << 16)
+    parser.add_argument("--limit", type=int, default=1000000)
+    args = parser.parse_args()
+
+    with open(args.file, "rb") as f:
+        cpu = ZPU(f.read(), memory_size=args.memory)
+    cpu.run(limit=args.limit)
+    print(" ".join(hex(word) for word in cpu.stack()))
+
+
+if __name__ == "__main__":
+    main()

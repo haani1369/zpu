@@ -110,14 +110,17 @@ def _tokenize(source):
             labels.append(tokens[i][:-1])
             i += 1
         mnemonic = operand = None
-        if i < len(tokens):
-            mnemonic = tokens[i].lower()
-            i += 1
-        if i < len(tokens):
-            operand = tokens[i]
-            i += 1
-        if i < len(tokens):
-            raise AsmError("unexpected token: %s" % tokens[i])
+        if i < len(tokens) and tokens[i].startswith("."):
+            pass  # assembler directive (.text, .globl, ...): ignore the line
+        else:
+            if i < len(tokens):
+                mnemonic = tokens[i].lower()
+                i += 1
+            if i < len(tokens):
+                operand = tokens[i]
+                i += 1
+            if i < len(tokens):
+                raise AsmError("unexpected token: %s" % tokens[i])
         if labels or mnemonic:
             rows.append((labels, mnemonic, operand))
     return rows
@@ -179,3 +182,21 @@ def assemble(source):
         if unit[0] == "insn":
             out += _encode(unit[1], unit[2], labels)
     return bytes(out)
+
+def main():
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("file")
+    parser.add_argument("-o", default="a.out")
+    args = parser.parse_args()
+
+    with open(args.file, "r") as f:
+        content = f.read()
+
+    with open(args.o, "wb") as f:
+        f.write(assemble(content))
+
+if __name__ == "__main__":
+    main()
+
