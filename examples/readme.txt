@@ -28,3 +28,11 @@ expected output:
 these run through the reference flow: clang and llc emit text assembly which
 the python assembler in ../sim turns into a program image. the separate object
 and linker path (llc -filetype=obj with ../linker) is for multi-file programs.
+
+run_linked.py runs the same single-file programs, plus multi_helper.c and
+multi_main.c (gcd split across two translation units, expected 21), through
+the real toolchain instead: `clang --target=zpu prog.c -o prog.bin`, with
+clang itself invoking ../linker/zpld.py as its link step. see
+../docs/zpu_linker.txt for how that's wired up.
+
+    python3 run_linked.py
