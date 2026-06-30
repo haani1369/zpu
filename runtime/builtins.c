@@ -16,6 +16,28 @@ static u64 mul32(u32 a, u32 b) {
     return ll + (lh << 16) + (hl << 16) + (hh << 32);
 }
 
+u32 __udivsi3(u32 a, u32 b) {
+    u32 q = 0, r = 0;
+    for (int i = 31; i >= 0; i--) {
+        r = (r << 1) | ((a >> i) & 1);
+        if (r >= b) {
+            r = r - b;
+            q = q | (1u << i);
+        }
+    }
+    return q;
+}
+
+u32 __umodsi3(u32 a, u32 b) {
+    u32 r = 0;
+    for (int i = 31; i >= 0; i--) {
+        r = (r << 1) | ((a >> i) & 1);
+        if (r >= b)
+            r = r - b;
+    }
+    return r;
+}
+
 u64 __muldi3(u64 a, u64 b) {
     u32 al = (u32)a, ah = (u32)(a >> 32);
     u32 bl = (u32)b, bh = (u32)(b >> 32);
