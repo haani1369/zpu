@@ -1,0 +1,231 @@
+zpu soc: a zpu core attached to a virtio device over mmio
+
+this describes a small system-on-chip built around the zpu simulator in
+sim/zpu.py: a flat ram region plus a memory-mapped virtio device, so zpu
+machine code can talk to a device by reading and writing ordinary memory
+addresses with the existing load/store instructions. no changes are made
+to sim/zpu.py; the soc replaces the cpu's mem object with a bus that
+dispatches to ram or to a device depending on the address.
+
+
+memory map
+
+    0x00000000 .. ram_size          ram
+    ram_size   .. ram_size+dev_size mmio window for the attached device
+
+ram_size and the device are both chosen when the soc is constructed; there
+is no gap between them. an access below ram_size goes straight to ram. an
+access at or above ram_size is offset into the device's register file. an
+access past the end of the device's window is out of bounds, same as any
+other out-of-bounds zpu memory access.
+
+byte and halfword loads/stores (loadb/storeb/loadh/storeh) are only valid
+against ram. the mmio window is word-only, matching the real virtio-mmio
+spec's requirement that registers are accessed as native 4-byte values.
+
+multiple devices can be attached at different base addresses; this
+document describes the one device implemented so far.
+
+
+why this deviates from the virtio specification
+
+upstream virtio fixes the byte order of every register and every
+virtqueue structure to little-endian, regardless of the guest cpu's own
+endianness, and packs some virtqueue fields (flags, next) into 16 bits
+each to save space on real hardware.
+
+zpu is big-endian and has no sub-word addressing benefit to gain from
+packing (it has no registers; everything is loads, stores, and stack
+slots). there is also no real hardware or OS on the other end of this
+device -- it only ever talks to zpu guest code written for it. so this
+implementation:
+
+    - encodes every mmio register and every virtqueue field as a plain
+      32-bit value in the same big-endian byte order load/store already
+      use, instead of forcing little-endian.
+    - gives every virtqueue field, including ones the spec packs into 16
+      bits, its own full 32-bit word, so guest code only ever needs word
+      load/store to read or write any field.
+
+the register offsets, field names, and overall protocol (feature
+negotiation, status bits, descriptor chaining, avail/used rings) are
+otherwise taken directly from the virtio 1.1 mmio transport. a real
+virtio driver would not understand this device and this device would not
+understand a real virtio driver; the protocol shape is kept for
+familiarity, not for interoperability.
+
+zpu also has no interrupt mechanism. a real virtio driver would wait for
+an interrupt after writing queuenotify; a driver here must poll the used
+ring's idx field directly until it changes. interruptstatus and
+interruptack are still implemented so the register file is complete and
+so a future cpu revision with interrupts would not need device changes.
+
+
+mmio register file
+
+offsets are relative to the device's base address. all registers are 32
+bits.
+
+    0x000  magicvalue        r   0x74726976
+    0x004  version           r   2
+    0x008  deviceid          r   device type (console = 3)
+    0x00c  vendorid          r   1 (implementation-defined, arbitrary)
+    0x010  devicefeatures    r   bits 0..31 or 32..63 of the device's
+                                  feature bitmap, selected by
+                                  devicefeaturessel; this implementation
+                                  offers no features, so always 0
+    0x014  devicefeaturessel w   0 selects the low half, 1 the high half
+    0x020  driverfeatures    w   bits the driver is accepting (ignored;
+                                  there is nothing to negotiate)
+    0x024  driverfeaturessel w   selects which half driverfeatures sets
+    0x030  queuesel          w   selects the queue the queue* registers
+                                  below refer to
+    0x034  queuenummax       r   maximum queue size for queuesel's queue
+    0x038  queuenum          w   queue size the driver is configuring
+    0x044  queueready        rw  1 once the driver has finished
+                                  configuring the selected queue
+    0x050  queuenotify       w   driver writes a queue index here after
+                                  adding buffers to that queue's avail ring
+    0x060  interruptstatus   r   bit 0: a used buffer is ready
+                                  bit 1: device configuration changed
+    0x064  interruptack      w   driver writes back bits to clear them
+    0x070  status            rw  device status (see below); writing 0
+                                  resets the device
+    0x080  queuedesclow      w   descriptor table address, low 32 bits
+    0x084  queuedeschigh     w   descriptor table address, high 32 bits
+                                  (always 0; zpu addresses are 32 bits)
+    0x090  queueavaillow     w   avail ring address, low 32 bits
+    0x094  queueavailhigh    w   avail ring address, high 32 bits
+    0x0a0  queueusedlow      w   used ring address, low 32 bits
+    0x0a4  queueusedhigh     w   used ring address, high 32 bits
+    0x0fc  configgeneration  r   increments when the config space changes
+    0x100  config space      device-specific, see below
+
+status bits (0x070), matching the spec's meaning:
+
+    bit 0  acknowledge   driver has noticed the device
+    bit 1  driver        driver knows how to drive the device
+    bit 2  driver_ok     driver is ready to drive the device
+    bit 3  features_ok   driver has finished feature negotiation
+    bit 7  failed        something went wrong
+
+the device only processes queuenotify while driver_ok is set. a driver
+that writes queuenotify before finishing the status handshake is ignored,
+the same as on real hardware.
+
+the expected driver sequence to bring up a queue:
+
+    1. write status = acknowledge
+    2. write status = acknowledge | driver
+    3. read devicefeatures (optional; this device has none to offer)
+    4. write driverfeatures = 0, write status |= features_ok
+    5. read back status and confirm features_ok is still set
+    6. for each queue: write queuesel, read queuenummax, write queuenum,
+       write queuedesclow/high, queueavaillow/high, queueusedlow/high,
+       write queueready = 1
+    7. write status |= driver_ok
+
+
+virtqueue layout
+
+a split virtqueue is three structures the driver allocates in ram and
+tells the device about via the queuedesc/queueavail/queueused registers.
+queuenum is the number of descriptor table entries and the number of
+slots in each ring; it must be a power of two no larger than
+queuenummax. every field below is a separate 32-bit word, in address
+order, with no padding.
+
+descriptor table, queuenum entries of 5 words (20 bytes) each:
+
+    word 0   addr low 32 bits of the buffer's address
+    word 1   addr high 32 bits (always 0)
+    word 2   len       length of the buffer in bytes
+    word 3   flags     bit 0: next, bit 1: write
+    word 4   next      index of the next descriptor in this chain,
+                        meaningful only if flags has next set
+
+flags.write means the device writes into this buffer (used for receive
+buffers); without it the device only reads the buffer (used for transmit
+buffers). a descriptor chain is one or more descriptors linked by next,
+read or written in order to form one logical buffer.
+
+avail ring, header plus queuenum entries:
+
+    word 0       flags   unused, always 0
+    word 1       idx     number of descriptor chains the driver has
+                          ever published, modulo 2^32
+    word 2 + i   ring[i] head descriptor index of the i'th published
+                          chain, for i in 0 .. queuenum-1
+
+the driver publishes a chain by writing its head index into
+ring[idx mod queuenum] and then incrementing idx. the device tracks how
+much of the ring it has already consumed on its own; nothing in memory
+records that.
+
+used ring, header plus queuenum entries of 2 words each:
+
+    word 0           flags  unused, always 0
+    word 1           idx    number of chains the device has completed
+    word 2 + 2*i     id     head descriptor index of the i'th completed
+                            chain
+    word 3 + 2*i     len    bytes the device read or wrote for that chain
+
+the device completes a chain by writing {id, len} into
+ring[idx mod queuenum] and incrementing idx. a polling driver watches
+this idx for changes.
+
+
+virtio console device
+
+device id 3, two queues fixed by the protocol (single port, no
+multiport feature):
+
+    queue 0  receiveq   device writes into driver-supplied buffers;
+                         carries data arriving from outside the guest
+    queue 1  transmitq   device reads driver-supplied buffers; carries
+                         data the guest is sending out
+
+config space (offset 0x100 from the device base), provided for
+completeness though this implementation does not use multiple ports or
+window sizing:
+
+    0x100  cols          u32, 0
+    0x104  rows          u32, 0
+    0x108  max_nr_ports  u32, 1
+    0x10c  emerg_wr      u32, write a single character here for an
+                          out-of-band emergency write (this
+                          implementation forwards it to the same output
+                          as a transmitq byte)
+
+on transmitq notify, the device walks every newly available descriptor
+chain, concatenates the bytes from every descriptor in the chain (using
+each descriptor's len, ignoring the write flag since transmit buffers are
+device-read), and hands the result to the device's output callback (the
+soc's default callback writes the bytes straight to stdout). it then
+completes the chain on the used ring with len equal to the number of
+bytes consumed and sets interruptstatus bit 0.
+
+receiveq buffers are completed as input becomes available rather than on
+notify: when bytes are fed into the device from outside the guest, it
+copies as many bytes as fit into the oldest available receiveq
+descriptor chain it has not yet consumed, completes that chain on the
+used ring with len equal to the number of bytes copied, and sets
+interruptstatus bit 0. a notify on queue 0 simply tells the device new
+buffers exist to receive into; it does not by itself produce data.
+
+
+layout in this repository
+
+    soc/mmio.py            the bus: ram plus a list of mmio regions
+    soc/virtio.py           the mmio register file and virtqueue helper,
+                            shared by every virtio device
+    soc/virtio_console.py   the console device described above
+    soc/zpu_soc.py          wires a zpu core to the bus and the console
+                            device; provides a command-line entry point
+    soc/test_soc.py         tests
+    soc/hello_console.s     a hand-written zpu program that brings the
+                            console device up and transmits a string
+
+run the demo with:
+
+    python3 soc/zpu_soc.py soc/hello_console.s
