@@ -8,6 +8,8 @@ sys.path.insert(0, os.path.dirname(__file__))
 from zpu import ZPU, ZPUError
 from assembler import assemble
 from mmio import Bus
+from memmap import (UART0_BASE, VIDEO0_BASE, VIRTIO0_BASE, VIRTIO1_BASE,
+                    RAM_WINDOW_SIZE, VRAM_BASE, VRAM_WINDOW_SIZE)
 from virtio import (
     VirtioMMIODevice,
     Virtqueue,
@@ -53,34 +55,65 @@ class BusTests(unittest.TestCase):
         bus[5] = 0x42
         self.assertEqual(bus[5], 0x42)
 
-    def test_device_dispatch(self):
+    def test_ram_beyond_configured_size_is_unmapped(self):
+        bus = Bus(64)
+        with self.assertRaises(ZPUError):
+            bus[64:68]
+
+    def test_uart_slot_dispatch(self):
         bus = Bus(64)
         dev = FakeDevice()
-        base = bus.attach(dev, 0x100)
-        self.assertEqual(base, 64)
-        bus[base + 8:base + 12] = (99).to_bytes(4, "big")
+        bus.set_uart(dev)
+        bus[UART0_BASE + 8:UART0_BASE + 12] = (99).to_bytes(4, "big")
         self.assertEqual(dev.writes, [(8, 99)])
-        self.assertEqual(int.from_bytes(bus[base + 4:base + 8], "big"),
-                         0xabcd0000 | 4)
+        self.assertEqual(
+            int.from_bytes(bus[UART0_BASE + 4:UART0_BASE + 8], "big"),
+            0xabcd0000 | 4)
 
-    def test_byte_access_to_device_rejected(self):
+    def test_virtio_slot_dispatch(self):
         bus = Bus(64)
-        base = bus.attach(FakeDevice(), 0x100)
+        dev = FakeDevice()
+        bus.set_virtio(0, dev)
+        bus[VIRTIO0_BASE:VIRTIO0_BASE + 4] = (1).to_bytes(4, "big")
+        self.assertEqual(dev.writes, [(0, 1)])
+        bus.set_virtio(1, dev)
+        bus[VIRTIO1_BASE + 4:VIRTIO1_BASE + 8] = (2).to_bytes(4, "big")
+        self.assertEqual(dev.writes, [(0, 1), (4, 2)])
+
+    def test_unattached_mmio_slot_rejected(self):
+        bus = Bus(64)
         with self.assertRaises(ZPUError):
-            bus[base]
+            bus[UART0_BASE:UART0_BASE + 4]
 
-    def test_len_covers_ram_and_devices(self):
+    def test_byte_access_to_mmio_rejected(self):
         bus = Bus(64)
-        bus.attach(FakeDevice(), 0x100)
-        self.assertEqual(len(bus), 64 + 0x100)
+        bus.set_uart(FakeDevice())
+        with self.assertRaises(ZPUError):
+            bus[UART0_BASE]
+
+    def test_vram_word_and_byte_access(self):
+        bus = Bus(64, vram_size=64)
+        bus[VRAM_BASE:VRAM_BASE + 4] = (0xdeadbeef).to_bytes(4, "big")
+        self.assertEqual(int.from_bytes(bus[VRAM_BASE:VRAM_BASE + 4], "big"),
+                         0xdeadbeef)
+        bus[VRAM_BASE + 4] = 7
+        self.assertEqual(bus[VRAM_BASE + 4], 7)
+
+    def test_vram_beyond_configured_size_is_unmapped(self):
+        bus = Bus(64, vram_size=64)
+        with self.assertRaises(ZPUError):
+            bus[VRAM_BASE + 64:VRAM_BASE + 68]
+
+    def test_len_is_the_fixed_address_space_regardless_of_populated_size(self):
+        bus = Bus(64)
+        self.assertEqual(len(bus), VRAM_BASE + VRAM_WINDOW_SIZE)
 
     def test_out_of_bounds_via_zpu_read_word(self):
         bus = Bus(64)
-        bus.attach(FakeDevice(), 0x100)
         cpu = ZPU(bytes(4), memory_size=64)
         cpu.mem = bus
         with self.assertRaises(ZPUError):
-            cpu.read_word(64 + 0x100)
+            cpu.read_word(RAM_WINDOW_SIZE)
 
 
 class VirtioRegisterTests(unittest.TestCase):
@@ -283,14 +316,15 @@ class IntegrationTests(unittest.TestCase):
         bus = Bus(1024)
         output = bytearray()
         console = VirtioConsole(queue_size=4, on_output=output.extend)
-        base = bus.attach(console, 0x200)
+        bus.set_virtio(0, console)
         console.attach_ram(bus.ram)
 
         program = assemble(
             "    im %d\n"
             "    im %d\n"
             "    store\n"
-            "    breakpoint\n" % (VirtioConsole.TRANSMITQ, base + QUEUENOTIFY))
+            "    breakpoint\n" % (VirtioConsole.TRANSMITQ,
+                                  VIRTIO0_BASE + QUEUENOTIFY))
         cpu = ZPU(program, memory_size=1024)
         bus.ram[:] = cpu.mem
         cpu.mem = bus
