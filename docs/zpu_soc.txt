@@ -1,30 +1,27 @@
-zpu soc: a zpu core attached to a virtio device over mmio
+zpu soc: a zpu core attached to mmio peripherals
 
 this describes a small system-on-chip built around the zpu simulator in
-sim/zpu.py: a flat ram region plus a memory-mapped virtio device, so zpu
-machine code can talk to a device by reading and writing ordinary memory
+sim/zpu.py: ram plus a set of memory-mapped peripherals, so zpu machine
+code can talk to a device by reading and writing ordinary memory
 addresses with the existing load/store instructions. no changes are made
 to sim/zpu.py; the soc replaces the cpu's mem object with a bus that
-dispatches to ram or to a device depending on the address.
+dispatches to ram, to vram, or to a device's registers depending on the
+address.
 
-
-memory map
-
-    0x00000000 .. ram_size          ram
-    ram_size   .. ram_size+dev_size mmio window for the attached device
-
-ram_size and the device are both chosen when the soc is constructed; there
-is no gap between them. an access below ram_size goes straight to ram. an
-access at or above ram_size is offset into the device's register file. an
-access past the end of the device's window is out of bounds, same as any
-other out-of-bounds zpu memory access.
+the addresses themselves -- where ram ends, where each device's
+registers live, where vram is -- are a fixed contract, not something
+this soc happens to have picked: docs/zpu_memmap.txt is the specification
+every backend (this python simulator, a future qemu machine, a future
+fpga build) implements identically, so a zpu binary or a piece of the
+stdlib in soc/ needs no knowledge of which backend it is actually running
+on. this document covers the bus mechanics and the virtio-specific
+device that lives at one of those fixed addresses; see zpu_memmap.txt for
+the addresses themselves and for the uart and video devices.
 
 byte and halfword loads/stores (loadb/storeb/loadh/storeh) are only valid
-against ram. the mmio window is word-only, matching the real virtio-mmio
-spec's requirement that registers are accessed as native 4-byte values.
-
-multiple devices can be attached at different base addresses; this
-document describes the one device implemented so far.
+against ram and vram. the mmio window is word-only, matching the real
+virtio-mmio spec's requirement that registers are accessed as native
+4-byte values -- true of every device on this bus, not just virtio ones.
 
 
 why this deviates from the virtio specification
@@ -214,19 +211,23 @@ interruptstatus bit 0. a notify on queue 0 simply tells the device new
 buffers exist to receive into; it does not by itself produce data.
 
 
-a c driver for guest programs
+a c driver for the secondary channel
 
-soc/zpu_console.h and soc/zpu_console.c are a small driver, meant to be
-compiled by the zpu clang and linked into a guest c program, so programs
-do not need to drive the virtqueues by hand the way hello_console.s does.
-it assumes the console sits at 0x10000 (ram_size 0x10000, the soc's
-default), matching hello_console.s's assumption.
+soc/zpu_virtio_console.h and soc/zpu_virtio_console.c are a small driver
+for this device specifically, meant to be compiled by the zpu clang and
+linked into a guest c program that wants the richer channel, so it does
+not need to drive the virtqueues by hand the way hello_virtio_console.s
+does. the stdlib every other guest program should use for the terminal
+is soc/zpu_console.h/.c instead, documented in zpu_memmap.txt alongside
+the uart device it drives -- this driver is only for programs that
+specifically want virtio (a future block device, say) rather than the
+terminal.
 
-    void zpu_console_init(void);
-    void zpu_console_putc(char c);
-    void zpu_console_write(const char *data, int len);
-    void zpu_console_puts(const char *s);
-    int  zpu_console_getc(void);
+    void zpu_virtio_console_init(void);
+    void zpu_virtio_console_putc(char c);
+    void zpu_virtio_console_write(const char *data, int len);
+    void zpu_virtio_console_puts(const char *s);
+    int  zpu_virtio_console_getc(void);
 
 init brings the device up and configures both queues with a single
 descriptor each (queuenum 1): the driver is fully synchronous, one
@@ -244,44 +245,66 @@ driver refills from one at a time and reposts once drained; a caller
 never sees or touches it directly.
 
 the descriptor table and avail/used rings the driver uses for each queue
-are ordinary file-scope arrays inside zpu_console.c, not fixed addresses
--- the compiler places them whenever it lays out the program, the same
-as any other global, so there is no possibility of them colliding with
-the guest program's own data the way a hardcoded address could.
+are ordinary file-scope arrays inside zpu_virtio_console.c, not fixed
+addresses -- the compiler places them whenever it lays out the program,
+the same as any other global, so there is no possibility of them
+colliding with the guest program's own data the way a hardcoded address
+could.
 
 a buffer handed to the device only through its address, with nothing in
 the visible c code reading it back, looks dead to the compiler: nothing
 proves the store into it is ever observed, so an otherwise unremarkable
 optimization can delete the store and hand the device a pointer to
-whatever was there before. zpu_console_putc hit exactly this -- the
+whatever was there before. the putc function hit exactly this -- the
 one-byte local it points the device at must be volatile, or the
 character never actually gets written before the device reads it. the
-same reasoning applies to rx_buf on the receive side, which is written
-only by the device's "dma" into guest memory and never by anything the
-compiler can see: it is also volatile, even though nothing has yet
-caught a miscompile there.
+same reasoning applies to the receive buffer, which is written only by
+the device's "dma" into guest memory and never by anything the compiler
+can see: it is also volatile, even though nothing has yet caught a
+miscompile there. this whole class of bug is one more reason the uart
+driver -- a plain register write, no address ever handed to anything --
+is the better choice for anything that is not specifically after
+virtio's richer semantics.
 
 
 layout in this repository
 
-    soc/mmio.py            the bus: ram plus a list of mmio regions
-    soc/virtio.py           the mmio register file and virtqueue helper,
-                            shared by every virtio device
-    soc/virtio_console.py   the console device described above
-    soc/zpu_soc.py          wires a zpu core to the bus and the console
-                            device; provides a command-line entry point
-    soc/test_soc.py         tests
-    soc/hello_console.s     a hand-written zpu program that brings the
-                            console device up and transmits a string
-    soc/zpu_console.h       the c driver's interface
-    soc/zpu_console.c       the c driver's implementation
-    soc/hello.c             a guest program using the c driver
+    soc/memmap.py
+        the fixed addresses, mirroring docs/zpu_memmap.txt
+    soc/mmio.py
+        the bus: ram, vram, and the mmio window's fixed device slots
+    soc/uart.py
+        the terminal device
+    soc/video.py
+        the framebuffer device
+    soc/virtio.py
+        the mmio register file and virtqueue helper, shared by every
+        virtio device
+    soc/virtio_console.py
+        the virtio console device described above
+    soc/zpu_soc.py
+        wires a zpu core to the bus and its devices; provides a
+        command-line entry point
+    soc/test_soc.py, test_uart.py, test_video.py, test_run_c.py
+        tests
+    soc/hello_uart.s
+        a hand-written zpu program that prints a message over the
+        terminal
+    soc/hello_virtio_console.s
+        the same, over the secondary channel
+    soc/zpu_console.h, soc/zpu_console.c
+        the terminal's c driver
+    soc/zpu_virtio_console.h, soc/zpu_virtio_console.c
+        the secondary channel's c driver
+    soc/hello.c
+        a guest program using the terminal's c driver
 
-run the demo with:
+run the demos with:
 
-    python3 soc/zpu_soc.py soc/hello_console.s
+    python3 soc/zpu_soc.py soc/hello_uart.s
+    python3 soc/zpu_soc.py soc/hello_virtio_console.s --virtio-console
 
-it brings the transmitq up, sends one message, polls the used ring until
-the device completes it, and halts. expected output:
+both print the same message, the second one over the secondary channel
+(which is not attached by default -- see --virtio-console above):
 
     hello from zpu!
