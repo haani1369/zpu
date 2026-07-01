@@ -11,7 +11,7 @@ sys.path.insert(0, HERE)
 
 from zpu import ZPU
 import zpld
-from zpu_soc import SoC
+from zpu_soc import SoC, run_interactive
 
 CLANG = os.path.join(ROOT, "llvm-project/build/bin/clang")
 LLC = os.path.join(ROOT, "llvm-project/build/bin/llc")
@@ -47,11 +47,14 @@ def build(path, ram_size=1 << 16):
     return soc
 
 
-def run(path, feed=None, ram_size=1 << 16, limit=20000000):
+def run(path, feed=None, ram_size=1 << 16, limit=20000000, interactive=False):
     soc = build(path, ram_size=ram_size)
     if feed is not None:
         soc.uart.feed(feed.encode())
-    soc.run(limit=limit)
+    if interactive:
+        run_interactive(soc)
+    else:
+        soc.run(limit=limit)
     return soc
 
 
@@ -63,5 +66,7 @@ if __name__ == "__main__":
     parser.add_argument("--feed", default=None)
     parser.add_argument("--ram", type=int, default=1 << 16)
     parser.add_argument("--limit", type=int, default=20000000)
+    parser.add_argument("--interactive", action="store_true")
     args = parser.parse_args()
-    run(args.file, feed=args.feed, ram_size=args.ram, limit=args.limit)
+    run(args.file, feed=args.feed, ram_size=args.ram, limit=args.limit,
+       interactive=args.interactive)
