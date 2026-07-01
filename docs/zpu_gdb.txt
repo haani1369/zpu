@@ -1,0 +1,118 @@
+zpu gdb stub
+
+a gdb remote serial protocol (rsp) server wrapping sim/zpu.py, so a
+stock gdb can attach to a running zpu program over tcp and set
+breakpoints, step, and inspect registers and memory. no changes to
+sim/zpu.py and no patch to gdb itself are needed: gdb can drive an
+architecture it has no built-in support for as long as the stub
+describes the register set through the protocol's target description
+mechanism (qxfer:features:read), which is exactly what this does.
+
+
+scope
+
+breakpoints by address, single instruction stepping, continuing,
+register and memory read/write, and stopping a runaway continue with
+ctrl-c. no watchpoints, no hardware breakpoints, no multi-threading (the
+zpu has one execution context), no disassembly or backtraces (both need
+real architecture support in gdb, which this stub deliberately does not
+try to provide -- see limitations at the end).
+
+
+registers
+
+the zpu has exactly two architectural registers, pc and sp; there is no
+general-purpose register file. both are exposed as 32-bit registers
+named "pc" and "sp", regnum 0 and 1, described to gdb by the target
+description xml served over qxfer:features:read (see target_xml() in
+gdbstub.py). "pc" is named exactly that and typed code_ptr because gdb's
+generic remote target uses that to know which register is the program
+counter when it has no built-in architecture to fall back on.
+
+register values are sent as their four bytes in the target's own byte
+order, hex-encoded, per the rsp spec for the g/p packets. zpu is
+big-endian, so this is the same as the plain 8-hex-digit encoding of
+the integer value -- no byte-swapping needed on either side.
+
+
+memory
+
+m and M map directly onto the zpu's flat byte-addressable memory
+(sim/zpu.py's mem array), with no translation. reading or writing
+through gdb (e.g. x/8xw $sp to look at the operand stack, since sp
+points at the top of it) is exactly the same as the simulator's own
+read_word/write_word, just addressed a byte at a time as the protocol
+requires.
+
+
+breakpoints
+
+software breakpoints (z0/Z0) are a set of addresses the stub checks
+before executing each instruction during a continue, not a memory patch
+-- there is no need to save and restore an original opcode the way a
+real gdbserver does, since the stub already controls the fetch/decode/
+execute loop directly. continuing from a stop that landed exactly on a
+breakpoint executes one instruction unconditionally first, so the same
+breakpoint does not refire immediately; every step after that checks
+the breakpoint set before executing.
+
+single stepping (s) always executes exactly one instruction regardless
+of breakpoints, since the caller explicitly asked to move forward by
+one.
+
+
+stop reasons
+
+the zpu's own breakpoint instruction (opcode 0x00) is what every example
+and test program in this repository already uses to halt -- it sets the
+simulator's halted flag. a continue or step that causes the cpu to halt
+this way is reported to gdb as the process exiting (W00), ending the
+session, matching how that instruction is used everywhere else in this
+project. a continue or step that stops because it hit a breakpoint gdb
+itself inserted is reported as a trap (S05), keeping the session open
+for inspection and a further continue. ctrl-c from gdb during a
+continue is reported as S02.
+
+
+protocol notes
+
+packets are $<data>#<checksum>, checksum is the sum of the data bytes
+mod 256 as two lowercase hex digits; every packet received is acked
+with + before it is processed, matching the rsp default (no-ack mode is
+not negotiated). memory and register data always use plain hex
+encoding, never run-length compression, so none of the data the stub
+sends or expects to receive needs $, #, *, or } escaping.
+
+during a continue, the stub polls the socket for an incoming ctrl-c
+(a bare 0x03 byte, outside any $...# packet) every few thousand
+instructions rather than after every single one, since checking a
+socket is far slower than a python function call.
+
+
+running it
+
+    python3 gdb/gdbstub.py prog.s --port 1234
+
+then, from gdb:
+
+    (gdb) target remote localhost:1234
+    (gdb) break *0x10
+    (gdb) continue
+    (gdb) info registers
+    (gdb) x/8xw $sp
+    (gdb) stepi
+
+prog.s is assembled the same way sim/assembler.py's own command line
+does; a raw binary image also works if the file does not end in .s.
+
+
+limitations
+
+gdb runs entirely in its generic, architecture-less mode here, driven
+only by the target description xml. that gets registers, memory,
+breakpoints, and stepping working, which covers real debugging value,
+but gdb cannot disassemble zpu instructions (no architecture means no
+decoder) and cannot unwind a call stack (no calling-convention or frame
+information for a zpu-shaped stack, and no debug info from the compiler
+either, since it emits none). backtraces and disas are not available;
+everything else in the scope above is.
