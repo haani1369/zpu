@@ -285,7 +285,8 @@ layout in this repository
     soc/zpu_soc.py
         wires a zpu core to the bus and its devices; provides a
         command-line entry point
-    soc/test_soc.py, test_uart.py, test_video.py, test_run_c.py
+    soc/test_soc.py, test_uart.py, test_video.py, test_run_c.py,
+    test_interactive.py
         tests
     soc/hello_uart.s
         a hand-written zpu program that prints a message over the
@@ -298,8 +299,25 @@ layout in this repository
         the secondary channel's c driver
     soc/hello.c
         a guest program using the terminal's c driver
+    soc/echo.c
+        a guest program that echoes every character it reads until it
+        sees ctrl-d, for trying the terminal out live
 
-run the demos with:
+--feed on either cli preloads the uart's receive fifo with a fixed
+string before the program starts running -- useful for tests, but not
+the same thing as a live keyboard session, since soc.run() has no way
+to interleave reading stdin once it starts. --interactive is the real
+thing: it puts the actual terminal into raw mode and pumps stdin into
+the uart every so many cpu steps while the program runs, restoring the
+terminal on exit. try it with:
+
+    python3 soc/run_c.py soc/echo.c --interactive
+
+ctrl-c exits the session from the host side; ctrl-d is passed through
+to the guest program to interpret, which is what echo.c's own exit
+condition is watching for.
+
+run the non-interactive demos with:
 
     python3 soc/zpu_soc.py soc/hello_uart.s
     python3 soc/zpu_soc.py soc/hello_virtio_console.s --virtio-console
