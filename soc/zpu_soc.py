@@ -52,6 +52,7 @@ def main():
     parser.add_argument("--vram", type=int, default=1 << 16)
     parser.add_argument("--limit", type=int, default=5000000)
     parser.add_argument("--feed", default=None)
+    parser.add_argument("--virtio-console", action="store_true")
     args = parser.parse_args()
 
     if args.file.endswith(".s"):
@@ -61,7 +62,8 @@ def main():
         with open(args.file, "rb") as f:
             program = f.read()
 
-    soc = SoC(ram_size=args.ram, vram_size=args.vram)
+    soc = SoC(ram_size=args.ram, vram_size=args.vram,
+             attach_virtio_console=args.virtio_console)
     soc.load(program)
     if args.feed is not None:
         soc.uart.feed(args.feed.encode())
