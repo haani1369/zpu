@@ -7,19 +7,33 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "sim"))
 
 from zpu import ZPU, ZPUError
 
-TARGET_XML = b"""<?xml version="1.0"?>
-<!DOCTYPE target SYSTEM "gdb-target.dtd">
-<target>
-<feature name="org.gnu.gdb.zpu.core">
-<reg name="pc" bitsize="32" type="code_ptr"/>
-<reg name="sp" bitsize="32" type="data_ptr"/>
-</feature>
-</target>
-"""
+# gdb has no built-in notion of a zpu architecture, and every architecture it
+# does know rejects a target-description register set that doesn't match its
+# own hardcoded expectations, even when told there is no os. rather than
+# fight that, the stub speaks the i386 register wire format instead: no
+# target description is needed at all for an architecture gdb already knows
+# natively, and gdb's own $pc/$sp convenience registers already resolve to
+# eip/esp for i386, so nothing user-visible actually says "i386" except the
+# `set architecture i386` and `set endian big` lines the user runs once.
+# `set endian big` is what makes gdb display memory (the stack, e.g. `x/xw
+# $sp`) in zpu's real big-endian byte order instead of i386's native little-
+# endian; it makes gdb expect registers in big-endian order too, which is why
+# registers are encoded that way here rather than in i386's own native order.
+# the register ordering and regnums below are i386's fixed protocol register
+# list, not anything specific to this stub: eax, ecx, edx, ebx, esp, ebp,
+# esi, edi, eip, eflags, cs, ss, ds, es, fs, gs. only esp (regnum 4) and eip
+# (regnum 8) mean anything here.
+I386_REGNUM_SP = 4
+I386_REGNUM_PC = 8
+I386_NUM_REGS = 16
 
 
-def target_xml():
-    return TARGET_XML
+def _encode_reg(value):
+    return value.to_bytes(4, "big").hex().encode()
+
+
+def _decode_reg(hexdata):
+    return int.from_bytes(bytes.fromhex(hexdata.decode()), "big")
 
 
 def checksum(data):
@@ -175,30 +189,40 @@ class GDBServer:
             return b"S05"
         if packet == b"g":
             pc, sp = self.target.read_registers()
-            return b"%08x%08x" % (pc, sp)
+            regs = [0] * I386_NUM_REGS
+            regs[I386_REGNUM_SP] = sp
+            regs[I386_REGNUM_PC] = pc
+            return b"".join(_encode_reg(r) for r in regs)
         if packet.startswith(b"G"):
             hexdata = packet[1:]
-            self.target.write_registers(int(hexdata[0:8], 16),
-                                        int(hexdata[8:16], 16))
+            fields = [hexdata[i:i + 8] for i in range(0, len(hexdata), 8)]
+            pc, sp = self.target.read_registers()
+            if len(fields) > I386_REGNUM_SP:
+                sp = _decode_reg(fields[I386_REGNUM_SP])
+            if len(fields) > I386_REGNUM_PC:
+                pc = _decode_reg(fields[I386_REGNUM_PC])
+            self.target.write_registers(pc, sp)
             return b"OK"
         if packet.startswith(b"p"):
             n = int(packet[1:], 16)
+            if n >= I386_NUM_REGS:
+                return b"E01"
             pc, sp = self.target.read_registers()
-            if n == 0:
-                return b"%08x" % pc
-            if n == 1:
-                return b"%08x" % sp
-            return b"E01"
+            if n == I386_REGNUM_PC:
+                return _encode_reg(pc)
+            if n == I386_REGNUM_SP:
+                return _encode_reg(sp)
+            return _encode_reg(0)
         if packet.startswith(b"P"):
             n_hex, val_hex = packet[1:].split(b"=")
-            n, val = int(n_hex, 16), int(val_hex, 16)
-            pc, sp = self.target.read_registers()
-            if n == 0:
-                self.target.write_registers(val, sp)
-            elif n == 1:
-                self.target.write_registers(pc, val)
-            else:
+            n, val = int(n_hex, 16), _decode_reg(val_hex)
+            if n >= I386_NUM_REGS:
                 return b"E01"
+            pc, sp = self.target.read_registers()
+            if n == I386_REGNUM_PC:
+                self.target.write_registers(val, sp)
+            elif n == I386_REGNUM_SP:
+                self.target.write_registers(pc, val)
             return b"OK"
         if packet.startswith(b"m"):
             addr_hex, len_hex = packet[1:].split(b",")
@@ -227,14 +251,7 @@ class GDBServer:
                 self.target.cpu.pc = int(packet[1:], 16)
             return self._step_reply()
         if packet.startswith(b"qSupported"):
-            return b"qXfer:features:read+;PacketSize=4000"
-        if packet.startswith(b"qXfer:features:read:target.xml:"):
-            off_hex, len_hex = packet.rsplit(b":", 1)[-1].split(b",")
-            off, length = int(off_hex, 16), int(len_hex, 16)
-            xml = target_xml()
-            chunk = xml[off:off + length]
-            marker = b"l" if off + length >= len(xml) else b"m"
-            return marker + chunk
+            return b"PacketSize=4000"
         if packet in (b"D", b"k"):
             return b"OK"
         return b""

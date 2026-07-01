@@ -6,7 +6,11 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "sim"))
 sys.path.insert(0, os.path.dirname(__file__))
 
 from zpu import ZPU
-from gdbstub import PacketStream, Target, GDBServer, checksum, frame, target_xml
+from gdbstub import PacketStream, Target, GDBServer, checksum, frame
+
+
+def be(value):
+    return value.to_bytes(4, "big").hex().encode()
 
 
 class FramingTests(unittest.TestCase):
@@ -118,28 +122,45 @@ class GDBServerTests(unittest.TestCase):
         s = self.make("    breakpoint\n")
         s.target.cpu.pc = 0x10
         s.target.cpu.sp = 0x2000
-        self.assertEqual(s.handle_command(b"g"), b"00000010" + b"00002000")
+        regs = [0, 0, 0, 0, 0x2000, 0, 0, 0, 0x10, 0, 0, 0, 0, 0, 0, 0]
+        self.assertEqual(s.handle_command(b"g"), b"".join(be(r) for r in regs))
 
     def test_write_all_registers(self):
         s = self.make("    breakpoint\n")
-        reply = s.handle_command(b"G0000001000002000")
+        regs = [0, 0, 0, 0, 0x2000, 0, 0, 0, 0x10, 0, 0, 0, 0, 0, 0, 0]
+        reply = s.handle_command(b"G" + b"".join(be(r) for r in regs))
         self.assertEqual(reply, b"OK")
         self.assertEqual(s.target.read_registers(), (0x10, 0x2000))
 
-    def test_read_single_register(self):
+    def test_read_pc_and_sp_registers(self):
         s = self.make("    breakpoint\n")
+        s.target.cpu.pc = 0x10
         s.target.cpu.sp = 0x4000
-        self.assertEqual(s.handle_command(b"p1"), b"00004000")
+        self.assertEqual(s.handle_command(b"p8"), be(0x10))
+        self.assertEqual(s.handle_command(b"p4"), be(0x4000))
 
-    def test_read_unknown_register_is_an_error(self):
+    def test_read_unused_register_is_zero(self):
         s = self.make("    breakpoint\n")
-        self.assertEqual(s.handle_command(b"p9"), b"E01")
+        self.assertEqual(s.handle_command(b"p0"), be(0))
 
-    def test_write_single_register(self):
+    def test_read_out_of_range_register_is_an_error(self):
         s = self.make("    breakpoint\n")
-        reply = s.handle_command(b"P0=0000abcd")
+        self.assertEqual(s.handle_command(b"p10"), b"E01")
+
+    def test_write_pc_and_sp_registers(self):
+        s = self.make("    breakpoint\n")
+        reply = s.handle_command(b"P8=" + be(0x99))
         self.assertEqual(reply, b"OK")
-        self.assertEqual(s.target.read_registers()[0], 0xabcd)
+        self.assertEqual(s.target.read_registers()[0], 0x99)
+        reply = s.handle_command(b"P4=" + be(0xabcd))
+        self.assertEqual(reply, b"OK")
+        self.assertEqual(s.target.read_registers()[1], 0xabcd)
+
+    def test_write_unused_register_is_accepted_and_ignored(self):
+        s = self.make("    breakpoint\n")
+        before = s.target.read_registers()
+        self.assertEqual(s.handle_command(b"P0=" + be(0x99)), b"OK")
+        self.assertEqual(s.target.read_registers(), before)
 
     def test_read_memory(self):
         s = self.make("    breakpoint\n")
@@ -179,30 +200,16 @@ class GDBServerTests(unittest.TestCase):
     def test_step_reply(self):
         s = self.make("    im 5\n    breakpoint\n")
         self.assertEqual(s.handle_command(b"s"), b"S05")
-        self.assertEqual(s.target.cpu.pc, 2)
+        self.assertEqual(s.target.cpu.pc, 1)
 
     def test_step_to_halt_reply(self):
         s = self.make("    breakpoint\n")
         self.assertEqual(s.handle_command(b"s"), b"W00")
 
-    def test_qsupported_advertises_target_description(self):
+    def test_qsupported_reply(self):
         s = self.make("    breakpoint\n")
         reply = s.handle_command(b"qSupported:multiprocess+")
-        self.assertIn(b"qXfer:features:read+", reply)
-
-    def test_target_xml_transfer(self):
-        s = self.make("    breakpoint\n")
-        xml = target_xml()
-        reply = s.handle_command(
-            b"qXfer:features:read:target.xml:0,%x" % len(xml))
-        self.assertEqual(reply, b"l" + xml)
-
-    def test_target_xml_transfer_is_chunked(self):
-        s = self.make("    breakpoint\n")
-        xml = target_xml()
-        reply = s.handle_command(
-            b"qXfer:features:read:target.xml:0,4")
-        self.assertEqual(reply, b"m" + xml[:4])
+        self.assertIn(b"PacketSize", reply)
 
     def test_unknown_packet_is_unsupported(self):
         s = self.make("    breakpoint\n")

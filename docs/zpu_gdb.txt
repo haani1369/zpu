@@ -3,10 +3,7 @@ zpu gdb stub
 a gdb remote serial protocol (rsp) server wrapping sim/zpu.py, so a
 stock gdb can attach to a running zpu program over tcp and set
 breakpoints, step, and inspect registers and memory. no changes to
-sim/zpu.py and no patch to gdb itself are needed: gdb can drive an
-architecture it has no built-in support for as long as the stub
-describes the register set through the protocol's target description
-mechanism (qxfer:features:read), which is exactly what this does.
+sim/zpu.py and no patch to gdb itself are needed.
 
 
 scope
@@ -15,24 +12,57 @@ breakpoints by address, single instruction stepping, continuing,
 register and memory read/write, and stopping a runaway continue with
 ctrl-c. no watchpoints, no hardware breakpoints, no multi-threading (the
 zpu has one execution context), no disassembly or backtraces (both need
-real architecture support in gdb, which this stub deliberately does not
-try to provide -- see limitations at the end).
+real architecture support in gdb, which this stub does not have -- see
+limitations at the end).
+
+
+why this pretends to be i386
+
+the first design tried to describe the zpu's real register set (just pc
+and sp -- there is no general-purpose register file) through gdb's
+target description mechanism (qxfer:features:read), the documented way
+to hand gdb an architecture it has no built-in knowledge of. every
+architecture actually built into gdb -- arm, riscv, i386, or1k, all of
+them tried -- rejects a target-supplied description that does not match
+its own hardcoded register expectations, regardless of osabi. there
+appears to be no architecture gdb ships that accepts an arbitrary,
+foreign register set this way, at least not in gdb 15.1; "target
+description" turns out to mean "refine a set gdb already expects",
+never "define one from nothing".
+
+rather than patch gdb (out of scope for this repository -- see
+CLAUDE.md), the stub instead speaks the wire format of an architecture
+gdb already knows natively end to end: i386. gdb needs no target
+description at all for i386, so none of the above matters; the user
+runs `set architecture i386` once before connecting and everything
+past that point is genuinely zpu, not i386, except the byte layout of
+the g/p/P packets. gdb's own $pc and $sp convenience registers already
+resolve to i386's eip and esp, so pc/sp inspection reads naturally
+without the user ever typing eip or esp.
+
+this was found by direct experiment against a real gdb and gdb-multiarch
+15.1 (`set debug arch 1` shows exactly which registers a candidate
+architecture's gdbarch_init rejects and why), not by reading gdb's
+source, so it is possible some other gdb version or some architecture
+not tried here would have accepted a genuine target description; if
+that turns out to be true later, this whole section and the register
+encoding in gdbstub.py are the two things to revisit.
 
 
 registers
 
-the zpu has exactly two architectural registers, pc and sp; there is no
-general-purpose register file. both are exposed as 32-bit registers
-named "pc" and "sp", regnum 0 and 1, described to gdb by the target
-description xml served over qxfer:features:read (see target_xml() in
-gdbstub.py). "pc" is named exactly that and typed code_ptr because gdb's
-generic remote target uses that to know which register is the program
-counter when it has no built-in architecture to fall back on.
+i386's register list for the g/G/p/P packets is fixed by the protocol,
+not by anything in this stub: eax, ecx, edx, ebx, esp, ebp, esi, edi,
+eip, eflags, cs, ss, ds, es, fs, gs, regnums 0 through 15. only regnum 4
+(esp, i.e. the zpu's sp) and regnum 8 (eip, i.e. the zpu's pc) are real;
+every other register always reads as zero and a write to one is
+accepted and silently discarded.
 
-register values are sent as their four bytes in the target's own byte
-order, hex-encoded, per the rsp spec for the g/p packets. zpu is
-big-endian, so this is the same as the plain 8-hex-digit encoding of
-the integer value -- no byte-swapping needed on either side.
+`set endian big` is required after `set architecture i386` (see
+"running it" below) -- i386 is natively little-endian and gdb assumes
+that unless told otherwise, but zpu is big-endian both in its actual
+memory and in how this stub encodes register values, so without it
+both registers and memory would come back byte-reversed.
 
 
 memory
@@ -42,7 +72,8 @@ m and M map directly onto the zpu's flat byte-addressable memory
 through gdb (e.g. x/8xw $sp to look at the operand stack, since sp
 points at the top of it) is exactly the same as the simulator's own
 read_word/write_word, just addressed a byte at a time as the protocol
-requires.
+requires. memory is unaffected by the i386 masquerade above -- it was
+never architecture-specific to begin with, only registers were.
 
 
 breakpoints
@@ -93,8 +124,12 @@ running it
 
     python3 gdb/gdbstub.py prog.s --port 1234
 
-then, from gdb:
+then, from gdb (or gdb-multiarch, if the local gdb was not built with
+i386 support -- check with `gdb -batch -ex "set architecture i386"`,
+an unrecognized-architecture error means it was not):
 
+    (gdb) set architecture i386
+    (gdb) set endian big
     (gdb) target remote localhost:1234
     (gdb) break *0x10
     (gdb) continue
@@ -108,11 +143,19 @@ does; a raw binary image also works if the file does not end in .s.
 
 limitations
 
-gdb runs entirely in its generic, architecture-less mode here, driven
-only by the target description xml. that gets registers, memory,
-breakpoints, and stepping working, which covers real debugging value,
-but gdb cannot disassemble zpu instructions (no architecture means no
-decoder) and cannot unwind a call stack (no calling-convention or frame
-information for a zpu-shaped stack, and no debug info from the compiler
-either, since it emits none). backtraces and disas are not available;
-everything else in the scope above is.
+gdb cannot disassemble zpu instructions (its decoder genuinely thinks it
+is looking at i386 machine code) and cannot unwind a call stack (no
+debug info from the compiler, and no zpu-aware frame analysis in gdb).
+backtraces and disas are not available; everything else in the scope
+above is.
+
+gdb's own architecture-generic heuristics occasionally read one word
+above the current stack pointer while single-stepping, seemingly as
+part of best-effort frame tracking; on a program that has pushed
+little or nothing yet, that read can land exactly at the top of
+whatever --memory size was given and fail with "cannot access memory".
+this is not a bug in the stub -- that address is genuinely one word
+past the end of the configured memory -- it just means a shallow stack
+at the moment of a stepi can trip a probe gdb makes for reasons this
+stub has no control over. it goes away as soon as the stack is a little
+deeper, which in practice is almost immediately.
