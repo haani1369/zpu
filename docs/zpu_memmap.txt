@@ -1,0 +1,133 @@
+zpu physical memory map
+
+this is the address space contract every zpu backend -- the python
+simulator in soc/, a future qemu machine, and a future fpga build --
+implements identically. a compiled zpu program, and the stdlib in
+soc/zpu_console.c and soc/zpu_video.h, address hardware only through
+the fixed addresses below; nothing here is allowed to depend on how any
+one backend happens to be built. soc/memmap.py holds these same numbers
+as constants, so is a second source for the values but not a second
+source of truth -- this file is the truth, memmap.py just mirrors it in
+a form other python modules can import.
+
+
+overall layout
+
+    0x00000000 - 0x0fffffff   ram        (up to 256 mib)
+    0x10000000 - 0x1fffffff   mmio       (peripheral registers)
+    0x20000000 - 0x2fffffff   vram       (video framebuffer memory)
+    0x30000000 - 0xffffffff   reserved   (unmapped; future use)
+
+ram starts at address 0 because every zpu program compiled so far --
+the calling convention, the linker's entry trampoline, every hand-
+written .s file -- already assumes that; moving it was not an option.
+a given backend can populate less than the full 256 mib (the python
+simulator almost always does, by way of --ram), but never relocates
+where ram starts or claims address space past the 256 mib line as ram.
+
+reads or writes to a reserved or otherwise unbacked address are an
+error in the python simulator (the same zpuerror an out-of-bounds
+access anywhere else raises). that is a simulator convenience for
+catching mistakes early, not a cross-backend guarantee -- do not write
+code that depends on what happens when you touch memory that isn't
+there.
+
+
+mmio: peripheral registers, 0x10000000 - 0x1fffffff
+
+every peripheral gets its own 64 kib (0x10000) aligned window, whether
+or not its register file uses anywhere near that much, so a later
+revision can grow a device's registers or insert a new device without
+moving anyone else. all registers in every mmio device are 32 bits and
+word-aligned; sub-word (byte/halfword) access to the mmio window is not
+defined and must not be used, matching the earlier soc design's rule
+for the virtio window.
+
+    0x10000000 - 0x1000ffff   uart0    the terminal (see below)
+    0x10010000 - 0x1001ffff   video0   the framebuffer controller
+    0x10020000 - 0x1002ffff   virtio0  virtio-mmio slot 0
+    0x10030000 - 0x1003ffff   virtio1  virtio-mmio slot 1
+    0x10040000 - 0x1004ffff   virtio2  virtio-mmio slot 2
+    0x10050000 - 0x1005ffff   virtio3  virtio-mmio slot 3
+    0x10060000 - 0x1fffffff   reserved for future peripherals
+
+a given backend does not have to populate every slot -- an unattached
+virtio slot, for instance, is simply unmapped, the same as any other
+reserved address -- but a slot's address never moves depending on what
+is or isn't plugged into it.
+
+
+uart0: the terminal, 0x10000000
+
+the one device every backend -- python simulator, qemu, and the fpga
+build alike -- implements the same way, because it has to be the thing
+that still works when nothing else does. real terminals like this
+(16550 and its descendants) were the model, deliberately kept smaller:
+no baud rate, no interrupts (the zpu has none), no modem control, just
+enough to move bytes in and out.
+
+    0x00  data     rw   low 8 bits: writing transmits a byte; reading
+                        pops the oldest received byte from the receive
+                        fifo. reading with the fifo empty returns 0.
+    0x04  status   r    bit 0: rx_ready, a byte is waiting in the
+                        receive fifo. bit 1: tx_ready, always 1 in the
+                        python simulator, since it does not model
+                        transmit timing; real hardware may deassert it
+                        briefly while its own transmit buffering is
+                        full.
+
+the receive fifo holds 16 bytes. a byte arriving when it is already
+full is dropped; bytes already queued are not disturbed. a driver
+polls status before touching data -- check rx_ready before reading,
+tx_ready before writing -- the same discipline the virtio console
+driver already uses, since the zpu has no interrupt to wait on
+instead.
+
+
+video0: the framebuffer controller, 0x10010000
+
+    0x00  control        rw   bit 0: enable. 0 blanks the display.
+    0x04  width          rw   framebuffer width in pixels
+    0x08  height         rw   framebuffer height in pixels
+    0x0c  format         rw   0: 8bpp indexed (paletted)
+                              1: rgb565, 16bpp
+                              2: rgb888, 24bpp packed
+    0x10  base           rw   byte offset into vram (see below) where
+                              row 0 of the framebuffer starts, enabling
+                              double buffering by flipping this between
+                              two offsets
+    0x14  palette_index  w    selects a palette entry, 0-255, for the
+                              next access to palette_data
+    0x18  palette_data   rw   the selected entry's colour, as
+                              0x00rrggbb; meaningful only in indexed
+                              (format 0) mode
+
+width * height * bytes-per-pixel (1, 2, or 4 respectively) must fit
+inside the vram window below; nothing enforces that but the person
+setting the mode. row stride is always width * bytes-per-pixel -- there
+is no separate stride register, so there is no padding between rows.
+
+
+vram: framebuffer memory, 0x20000000 - 0x2fffffff
+
+plain byte-addressable memory, read and written the same way ram is,
+not through registers -- a pixel write is just a store to the right
+offset from video0's base register, the same as writing to any other
+address. 256 mib is reserved; only as much as the current mode
+actually needs is ever touched. this is a separate memory from ram
+specifically so a backend (especially the fpga build, where it will be
+genuinely separate block ram wired to a display timing generator) is
+free to implement it as physically distinct memory rather than a
+region carved out of main ram.
+
+
+virtio slots, 0x10020000 and up
+
+unchanged from the original soc design in docs/zpu_soc.txt (register
+layout, the big-endian/word-aligned deviation from the real virtio
+spec, the virtqueue structures) except that a slot's base address is
+now one of the four fixed addresses above instead of wherever the bus
+happened to place it after ram. virtio0 defaults to the console device
+from that design, kept as a secondary, richer channel alongside uart0
+-- useful later for e.g. a block device, less appropriate than uart0
+as the one thing every backend, fpga included, must speak identically.
