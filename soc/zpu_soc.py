@@ -100,6 +100,10 @@ def main():
     parser.add_argument("--interactive", action="store_true")
     args = parser.parse_args()
 
+    if args.file.endswith((".c", ".h")):
+        sys.exit("%s is c source, not something this tool can run directly; "
+                 "compile and run it with soc/run_c.py instead" % args.file)
+
     if args.file.endswith(".s"):
         with open(args.file) as f:
             program = assemble(f.read())
