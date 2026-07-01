@@ -14,8 +14,8 @@ class HelloConsoleTests(unittest.TestCase):
     def test_output_and_echo(self):
         output = bytearray()
         soc = run_c.build(os.path.join(os.path.dirname(__file__), "hello.c"))
-        soc.console.on_output = output.extend
-        soc.console.feed(b"abcde")
+        soc.uart.on_output = output.extend
+        soc.uart.feed(b"abcde")
         soc.run(limit=2000000)
         self.assertEqual(bytes(output), b"hello from zpu (c)!\nabcde\n")
 

@@ -7,18 +7,30 @@ sys.path.insert(0, os.path.dirname(__file__))
 from zpu import ZPU
 from assembler import assemble
 from mmio import Bus
+from uart import UartDevice
+from video import VideoDevice
 from virtio_console import VirtioConsole
-
-CONSOLE_MMIO_SIZE = 0x200
 
 
 class SoC:
-    def __init__(self, ram_size=1 << 16, console_queue_size=8, on_output=None):
-        self.bus = Bus(ram_size)
-        self.console = VirtioConsole(queue_size=console_queue_size,
-                                     on_output=on_output)
-        self.console_base = self.bus.attach(self.console, CONSOLE_MMIO_SIZE)
-        self.console.attach_ram(self.bus.ram)
+    def __init__(self, ram_size=1 << 16, vram_size=1 << 16,
+                on_output=None, attach_virtio_console=False,
+                virtio_console_queue_size=8):
+        self.bus = Bus(ram_size, vram_size=vram_size)
+
+        self.uart = UartDevice(on_output=on_output)
+        self.bus.set_uart(self.uart)
+
+        self.video = VideoDevice()
+        self.video.attach_vram(self.bus.vram)
+        self.bus.set_video(self.video)
+
+        self.console = None
+        if attach_virtio_console:
+            self.console = VirtioConsole(queue_size=virtio_console_queue_size)
+            self.bus.set_virtio(0, self.console)
+            self.console.attach_ram(self.bus.ram)
+
         self.cpu = None
 
     def load(self, program):
@@ -37,6 +49,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("file")
     parser.add_argument("--ram", type=int, default=1 << 16)
+    parser.add_argument("--vram", type=int, default=1 << 16)
     parser.add_argument("--limit", type=int, default=5000000)
     parser.add_argument("--feed", default=None)
     args = parser.parse_args()
@@ -48,10 +61,10 @@ def main():
         with open(args.file, "rb") as f:
             program = f.read()
 
-    soc = SoC(ram_size=args.ram)
+    soc = SoC(ram_size=args.ram, vram_size=args.vram)
     soc.load(program)
     if args.feed is not None:
-        soc.console.feed(args.feed.encode())
+        soc.uart.feed(args.feed.encode())
     soc.run(limit=args.limit)
 
 

@@ -50,7 +50,7 @@ def build(path, ram_size=1 << 16):
 def run(path, feed=None, ram_size=1 << 16, limit=20000000):
     soc = build(path, ram_size=ram_size)
     if feed is not None:
-        soc.console.feed(feed.encode())
+        soc.uart.feed(feed.encode())
     soc.run(limit=limit)
     return soc
 
