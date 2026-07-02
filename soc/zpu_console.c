@@ -17,11 +17,6 @@ void zpu_console_putc(char c) {
     reg(UART_DATA) = (unsigned char)c;
 }
 
-void zpu_console_write(const char *data, int len) {
-    for (int i = 0; i < len; i++)
-        zpu_console_putc(data[i]);
-}
-
 void zpu_console_puts(const char *s) {
     while (*s)
         zpu_console_putc(*s++);
