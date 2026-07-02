@@ -302,6 +302,11 @@ layout in this repository
     soc/echo.c
         a guest program that echoes every character it reads until it
         sees ctrl-d, for trying the terminal out live
+    soc/mandelbrot.c
+        renders the mandelbrot set to the video device using libc's
+        malloc and printf and double-precision softfloat math -- see
+        docs/zpu_libc.txt for the c library this and every other guest
+        program here can now use
 
 --feed on either cli preloads the uart's receive fifo with a fixed
 string before the program starts running -- useful for tests, but not
@@ -326,3 +331,21 @@ both print the same message, the second one over the secondary channel
 (which is not attached by default -- see --virtio-console above):
 
     hello from zpu!
+
+mandelbrot.c is a heavier demo, run through run_c.py so it links libc:
+
+    python3 soc/run_c.py soc/mandelbrot.c
+
+it prints progress over the uart while it renders and leaves the image
+in the soc's video device; save it to look at with
+soc.video.to_ppm() (see soc/test_video.py for the pattern). double
+precision on the python simulator's software float is slow enough
+that the demo keeps its resolution and iteration count small on
+purpose -- this is a correctness demonstration, not a fast one.
+
+it uses double, not float: switching this demo to float hits a real
+bug in runtime/softfloat.c's __mulsf3 (single-precision multiply) --
+the program hangs partway through the first multiply. double-precision
+multiply/add/compare all work correctly; this looks specific to the
+single-precision path, which apparently hadn't been exercised by
+anything else in the tree yet. not root-caused or fixed here.
