@@ -307,6 +307,13 @@ layout in this repository
         malloc and printf and double-precision softfloat math -- see
         docs/zpu_libc.txt for the c library this and every other guest
         program here can now use
+    soc/bounce.c
+        a much lighter demo than mandelbrot.c: an ascii ball bouncing
+        around a box, redrawn over the uart with ansi clear-and-home
+        codes each frame. pure integer arithmetic, so it runs in
+        seconds on the simulator rather than mandelbrot's tens of
+        seconds -- best watched with --interactive in a real terminal,
+        where the ansi codes redraw in place instead of scrolling
 
 --feed on either cli preloads the uart's receive fifo with a fixed
 string before the program starts running -- useful for tests, but not
@@ -342,6 +349,10 @@ soc.video.to_ppm() (see soc/test_video.py for the pattern). double
 precision on the python simulator's software float is slow enough
 that the demo keeps its resolution and iteration count small on
 purpose -- this is a correctness demonstration, not a fast one.
+
+bounce.c runs in a few seconds instead, and is worth watching live:
+
+    python3 soc/run_c.py soc/bounce.c --interactive
 
 it uses double, not float: switching this demo to float hits a real
 bug in runtime/softfloat.c's __mulsf3 (single-precision multiply) --
