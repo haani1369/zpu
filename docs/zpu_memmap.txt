@@ -2,13 +2,15 @@ zpu physical memory map
 
 this is the address space contract every zpu backend -- the python
 simulator in soc/, a future qemu machine, and a future fpga build --
-implements identically. a compiled zpu program, and the stdlib in
-soc/zpu_console.c and soc/zpu_video.h, address hardware only through
-the fixed addresses below; nothing here is allowed to depend on how any
-one backend happens to be built. soc/memmap.py holds these same numbers
-as constants, so is a second source for the values but not a second
-source of truth -- this file is the truth, memmap.py just mirrors it in
-a form other python modules can import.
+implements identically. a compiled zpu program, and the terminal
+driver in soc/zpu_console.c, address hardware only through the fixed
+addresses below; nothing here is allowed to depend on how any one
+backend happens to be built. there is no equivalent c driver for the
+video device yet -- soc/mandelbrot.c talks to it through the raw
+register addresses directly. soc/memmap.py holds these same numbers as
+constants, so is a second source for the values but not a second
+source of truth -- this file is the truth, memmap.py just mirrors it
+in a form other python modules can import.
 
 
 overall layout
