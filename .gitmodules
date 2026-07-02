@@ -1,3 +1,4 @@
 [submodule "llvm-project"]
 	path = llvm-project
-	url = https://github.com/haani1369/llvm-project/tree/main
+	url = https://github.com/haani1369/llvm-project.git
+	branch = zpu
