@@ -19,11 +19,16 @@ LLC = os.path.join(ROOT, "llvm-project/build/bin/llc")
 ENTRY_SP = 0x8000
 
 
+LIBC = os.path.join(ROOT, "libc")
+LIBC_SOURCES = ["string.c", "ctype.c", "stdlib.c", "stdio.c"]
+
+
 def _compile(path, workdir):
     name = os.path.splitext(os.path.basename(path))[0]
     ir = os.path.join(workdir, name + ".ll")
     obj = os.path.join(workdir, name + ".o")
-    subprocess.run([CLANG, "--target=zpu", "-O2", "-I", HERE,
+    subprocess.run([CLANG, "--target=zpu", "-O2", "-fno-jump-tables",
+                    "-I", HERE, "-I", LIBC,
                     "-emit-llvm", "-S", path, "-o", ir], check=True)
     subprocess.run([LLC, "-mtriple=zpu", "-filetype=obj", ir, "-o", obj],
                    check=True)
@@ -33,10 +38,12 @@ def _compile(path, workdir):
 
 def build(path, ram_size=1 << 16):
     workdir = tempfile.mkdtemp()
-    objs = [_compile(os.path.join(HERE, "zpu_console.c"), workdir),
-            _compile(path, workdir),
-            _compile(os.path.join(ROOT, "runtime", "builtins.c"), workdir),
-            _compile(os.path.join(ROOT, "runtime", "softfloat.c"), workdir)]
+    sources = [os.path.join(HERE, "zpu_console.c")]
+    sources += [os.path.join(LIBC, name) for name in LIBC_SOURCES]
+    sources.append(path)
+    sources += [os.path.join(ROOT, "runtime", "builtins.c"),
+               os.path.join(ROOT, "runtime", "softfloat.c")]
+    objs = [_compile(src, workdir) for src in sources]
     image, syms = zpld.link(objs)
 
     soc = SoC(ram_size=ram_size)
