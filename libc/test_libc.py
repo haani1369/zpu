@@ -2,20 +2,29 @@ import os
 import sys
 import unittest
 
-sys.path.insert(0, os.path.dirname(__file__))
-
-import run_test
-
 HERE = os.path.dirname(os.path.abspath(__file__))
-CLANG_MISSING = not os.path.exists(run_test.CLANG)
+ROOT = os.path.dirname(HERE)
+sys.path.insert(0, os.path.join(ROOT, "soc"))
+
+import run_c
+
+CLANG_MISSING = not os.path.exists(run_c.CLANG)
 
 
 @unittest.skipIf(CLANG_MISSING, "zpu clang is not built")
 class LibcTests(unittest.TestCase):
     def _run(self, name, feed=None):
         path = os.path.join(HERE, name)
-        soc, output = run_test.run(path, feed=feed)
-        return soc, output.decode(errors="replace")
+        soc = run_c.build(path, ram_size=1 << 18)
+        output = bytearray()
+        soc.uart.on_output = output.extend
+        if feed is not None:
+            soc.uart.feed(feed.encode())
+        try:
+            soc.run(limit=20000000)
+        except Exception:
+            pass
+        return soc, bytes(output).decode(errors="replace")
 
     def test_string(self):
         soc, output = self._run("test_string.c")

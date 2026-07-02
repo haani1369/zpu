@@ -28,10 +28,9 @@ layout
         qsort, abort, exit
     libc/stdio.h, libc/stdio.c
         putchar, getchar, puts, printf, sprintf, snprintf
-    libc/test_*.c, libc/run_test.py
-        tests; run_test.py mirrors soc/run_c.py's compile-link-run
-        pipeline but links the whole of libc in alongside whatever
-        runtime/*.c support code the program needs
+    libc/test_*.c, libc/test_libc.py
+        tests, run through soc/run_c.py's compile-link-run pipeline
+        (which already links libc into every program it builds)
 
 
 string.h
