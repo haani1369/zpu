@@ -1,0 +1,126 @@
+zpu libc: a small freestanding c library
+
+this is the c library programs compiled for the zpu use: string
+handling, a heap allocator, a handful of stdlib basics, and formatted
+i/o. it lives in libc/ as its own layer, separate from runtime/ (the
+i64 and float support code the compiler itself emits calls to) and
+separate from soc/zpu_console.c (the uart driver, a hardware detail).
+libc's stdio functions call into zpu_console.c for the actual byte i/o;
+everything else in libc has no dependency on the soc at all and would
+work unchanged on any freestanding zpu target.
+
+this is deliberately not a hosted, posix-shaped libc. there is no
+filesystem, no processes, no environment, no locale, and no wide
+characters, so none of stdio's file operations, none of stdlib's
+environment/subprocess functions, and no multibyte/locale-aware
+anything are provided. what is provided is the freestanding subset
+that lets ordinary c programs do real work: string.h, ctype.h, the
+non-environment parts of stdlib.h, and stdio.h's character and
+formatted-output functions.
+
+
+layout
+
+    libc/string.h, libc/string.c
+    libc/ctype.h, libc/ctype.c
+    libc/stdlib.h, libc/stdlib.c
+        malloc/free/calloc/realloc, abs/labs, atoi/atol, rand/srand,
+        qsort, abort, exit
+    libc/stdio.h, libc/stdio.c
+        putchar, getchar, puts, printf, sprintf, snprintf
+    libc/test_*.c, libc/run_test.py
+        tests; run_test.py mirrors soc/run_c.py's compile-link-run
+        pipeline but links the whole of libc in alongside whatever
+        runtime/*.c support code the program needs
+
+
+string.h
+
+memcpy, memmove, memset, memcmp, memchr, strlen, strcpy, strncpy,
+strcmp, strncmp, strcat, strncat, strchr, strrchr, strstr. ordinary
+byte-at-a-time implementations; there is no simd or word-at-a-time
+trick worth playing on a stack machine with no registers to hold a
+lookahead in.
+
+
+ctype.h
+
+isalpha, isdigit, isalnum, isupper, islower, isspace, ispunct,
+iscntrl, isxdigit, isprint, isgraph, toupper, tolower. plain ascii
+range checks, no locale table.
+
+
+stdlib.h: the allocator
+
+malloc's arena is a fixed-size static array (libc/stdlib.c's
+heap_storage, declared as a word array so it is naturally 4-byte
+aligned -- required, since the simulator silently rounds an unaligned
+address down to the nearest word on every load/store rather than
+raising an error, which would otherwise turn a bad pointer into silent
+corruption instead of a crash). the size is a compile-time constant
+(ZPU_HEAP_WORDS in stdlib.c); a program that needs a bigger heap raises
+it and gives the simulator enough --ram to hold it.
+
+blocks are an implicit list: each has an 8-byte header (size, free)
+immediately followed by its payload, and the next block's header
+starts right after that payload. malloc walks the list for the first
+free block that fits, splitting off the remainder if there is enough
+of it to be worth a second block; free marks a block free and then
+walks the whole list once, merging any run of consecutive free blocks
+into one. this is the classic textbook allocator, not a fast one --
+malloc and free are both o(n) in the number of live blocks -- which is
+the right trade for a demo-scale freestanding heap over the complexity
+of a real free-list-per-size-class design.
+
+realloc shrinks in place without ever reclaiming the freed tail (the
+next malloc's free-list walk will pick it up instead); growing always
+allocates fresh and copies, even when the next physical block happens
+to be free and adjacent. this is a real inefficiency, accepted for the
+same reason as the o(n) walk above.
+
+
+stdlib.h: abort and exit
+
+there is no os underneath this to hand control back to, so both just
+loop forever. this does not halt the simulator the way returning from
+main does (main returning executes the natural zero/breakpoint byte
+just past the loaded program, which is how run_c.py's entry trampoline
+is set up) -- calling abort or exit from a real running program leaves
+it spinning, visibly not making progress, rather than cleanly stopping
+the simulator's own step loop. a clean single-instruction halt would
+need either inline asm or a target-specific builtin lowering, neither
+of which this backend has; spinning is the honest freestanding
+fallback every other architecture without an os uses when there is
+truly nowhere to return to.
+
+
+stdio.h
+
+putchar and getchar are direct wrappers over zpu_console_putc/getc.
+puts writes a string followed by a newline. supported conversions across
+printf/sprintf/snprintf: %d %i %u %x (hex is lowercase only), %c, %s, %%,
+with width and zero-padding (%08x, %5d) since those are the ones real
+output formatting needs; no floating point conversion (%f/%e/%g), since
+printing an ieee value correctly needs a real dtoa/grisu-style algorithm
+and softfloat.c does not have one -- printing floats in this library
+means converting to an integer first.
+
+the natural way to write printf/sprintf/snprintf is one parsing function
+taking a va_list plus a small "how to emit one character" callback, called
+by three thin entry points. that is not how this is built: passing a
+va_list into a helper function, combined with dispatching output through
+a stored function pointer, produced a genuine miscompilation once both
+were combined in the same call chain on this backend (see zpu_isa.txt or
+the backend's own commit history for the shape of the bug -- narrowed down
+to specific instruction sequences, not fully root-caused before the
+workaround). the fix here is to avoid that shape entirely: the parsing
+grammar lives in one VFORMAT_BODY macro, and printf/sprintf/snprintf each
+expand their own copy of it with EMIT defined locally (a direct
+zpu_console_putc call, or a bounds-checked buffer write) -- so there is
+no va_list crossing a function boundary and no function pointer in the
+loop. three copies of the grammar instead of one shared function, kept
+this way because the alternative does not reliably work yet.
+
+variadic functions need the backend's va_start/va_arg support (see the
+zpu llvm backend's ZPUISelLowering.cpp), which is what makes printf
+possible here at all.
