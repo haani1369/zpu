@@ -26,6 +26,9 @@ CONFIG = 0x100
 DESCRIPTOR_WORDS = 5
 DESCRIPTOR_BYTES = DESCRIPTOR_WORDS * 4
 FLAG_NEXT = 1
+# part of the descriptor format (see docs/zpu_soc.txt), but this device's
+# transmitq/receiveq split already fixes each queue's direction, so nothing
+# here needs to inspect it.
 FLAG_WRITE = 2
 
 
@@ -193,6 +196,10 @@ class VirtioMMIODevice:
             self.queue.avail_addr = value
         elif offset == QUEUEUSEDLOW:
             self.queue.used_addr = value
+        elif offset == DRIVERFEATURES:
+            pass  # nothing to negotiate, see docs/zpu_soc.txt
+        elif offset in (QUEUEDESCHIGH, QUEUEAVAILHIGH, QUEUEUSEDHIGH):
+            pass  # always 0; zpu addresses are 32 bits, see docs/zpu_soc.txt
         elif CONFIG <= offset < CONFIG + self.config_size:
             self.config_write32(offset - CONFIG, value)
 
