@@ -52,8 +52,9 @@ then compile and run a c program on the simulated soc:
 
     python3 soc/run_c.py soc/bounce.c --interactive
 
-one frame of that demo -- an ascii ball bouncing over the uart, no
-floating point, so it runs in seconds:
+that demo is an ascii ball bouncing over the uart, no floating point,
+so it runs in seconds -- see demo.gif in this directory for a
+recording of it, or one frame of it here:
 
     --------------------------
     |                        |
