@@ -12,17 +12,17 @@ small freestanding c library.
 
 why
 
-mostly to actually understand, rather than just use, everything between
-"c source" and "bytes executing on a cpu": how a compiler backend
-lowers real code to a given instruction set, how a linker resolves
-symbols across object files, how a libc's malloc and printf work with
-no os underneath. an isa that's real but under-tooled is a good target
-for that, since there's no existing toolchain to lean on.
+a stack machine with no general registers removes register allocation,
+one of the harder parts of a normal compiler backend, while everything
+else a real toolchain needs -- calling conventions, relocations,
+multi-word arithmetic, software floating point, a linker, a libc --
+stays fully real. that keeps each piece small enough to read start to
+finish without making any of it a toy.
 
-nothing here is meant to be fast or production-grade -- it's a hobby
-project. if anything about it is worth noting, it's that it's a
-genuinely complete, working stack, top to bottom, rather than one
-clever piece of one layer.
+targeting an isa with no actively maintained toolchain also means
+there's nothing to fall back on: every relocation type, every calling
+convention detail, every libc primitive has to actually be built
+rather than inherited from an existing compiler or runtime.
 
 
 layout
